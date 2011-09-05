@@ -216,15 +216,31 @@ static void show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 		pgoff = ((loff_t)vma->vm_pgoff) << PAGE_SHIFT;
 	}
 
-	seq_printf(m, "%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu %n",
-			vma->vm_start,
-			vma->vm_end,
-			flags & VM_READ ? 'r' : '-',
-			flags & VM_WRITE ? 'w' : '-',
-			flags & VM_EXEC ? 'x' : '-',
-			flags & VM_MAYSHARE ? 's' : 'p',
-			pgoff,
-			MAJOR(dev), MINOR(dev), ino, &len);
+    if ((vma->vm_start <= mm->start_brk && vma->vm_end >= mm->brk) || 
+	    (vma->vm_start <= mm->start_stack && vma->vm_end >= mm->start_stack)) 
+    {
+        seq_printf(m, "%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu %n",
+        		vma->vm_start,
+        		vma->vm_end,
+        		flags & VM_READ ? 'r' : '-',
+        		flags & VM_WRITE ? 'w' : '-',
+        		'-',
+        		flags & VM_MAYSHARE ? 's' : 'p',
+        		pgoff,
+        		MAJOR(dev), MINOR(dev), ino, &len);
+    } 
+    else 
+    {
+       	seq_printf(m, "%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu %n",
+       			vma->vm_start,
+       			vma->vm_end,
+       			flags & VM_READ ? 'r' : '-',
+       			flags & VM_WRITE ? 'w' : '-',
+       			flags & VM_EXEC ? 'x' : '-',
+       			flags & VM_MAYSHARE ? 's' : 'p',
+       			pgoff,
+       			MAJOR(dev), MINOR(dev), ino, &len);
+    }
 
 	/*
 	 * Print the dentry name for named mappings, and a

@@ -26,6 +26,20 @@
  * interrupts will not entered from idle until the wake_locks are released.
  */
 
+//SW2-5-1-HC-Suspend_Hang_Timer-00+[
+#ifdef CONFIG_FIH_SUSPEND_HANG_TIMER
+#define GET_CPU_WORKQUEUE_FROM_WORKQUEUE(p_wq)  (struct cpu_workqueue_struct*)*(unsigned int*)((unsigned int)p_wq + 0x0)
+#define GET_THREAD_FROM_CPU_WORKQUEUE(p_cpu_wq) (struct task_struct*)*(unsigned int*)((unsigned int)p_cpu_wq + 0x18)
+#define POLLING_DUMP_SUSPEND_HANG_SECS  (10)
+
+enum {
+	SUSPEND_HANG = 0,
+	EARLY_SUSPEND_HANG,
+	LATE_RESUME_HANG,
+};
+#endif
+//SW2-5-1-HC-Suspend_Hang_Timer-00+]
+
 enum {
 	WAKE_LOCK_SUSPEND, /* Prevent suspend */
 	WAKE_LOCK_IDLE,    /* Prevent low power idle */

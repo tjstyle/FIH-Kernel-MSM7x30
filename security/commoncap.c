@@ -972,7 +972,8 @@ error:
  */
 int cap_syslog(int type)
 {
-	if ((type != 3 && type != 10) && !capable(CAP_SYS_ADMIN))
+	/* Allow type 2 command for klogd */
+	if ((type != 2 && type != 3 && type != 10) && !capable(CAP_SYS_ADMIN)) //SW2-5-1-MP-LogProcess_User-00*
 		return -EPERM;
 	return 0;
 }

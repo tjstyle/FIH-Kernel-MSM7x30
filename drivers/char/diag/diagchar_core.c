@@ -211,6 +211,36 @@ static int diagchar_close(struct inode *inode, struct file *file)
 	return -ENOMEM;
 }
 
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +[
+#define SD_CARD_DOWNLOAD    1
+#if SD_CARD_DOWNLOAD
+extern void diag_write_to_smd(uint8_t * cmd_buf, int cmd_size);
+extern int diag_read_from_smd(uint8_t * res_buf, int16_t * res_size);
+extern int proc_comm_alloc_sd_dl_smem(int);
+#define FLASH_PART_MAGIC1     0x55EE73AA
+#define FLASH_PART_MAGIC2     0xE35EBDDB
+#define FLASH_PARTITION_VERSION   0x3
+
+struct flash_partition_entry {
+	char name[16];
+	u32 offset;	/* Offset in blocks from beginning of device */
+	u32 length;	/* Length of the partition in blocks */
+	u8 attrib1;
+	u8 attrib2;
+	u8 attrib3;
+	u8 which_flash;	/* Numeric ID (first = 0, second = 1) */
+};
+struct flash_partition_table {
+	u32 magic1;
+	u32 magic2;
+	u32 version;
+	u32 numparts;
+	struct flash_partition_entry part_entry[16];
+};
+
+#endif
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +]
+
 static int diagchar_ioctl(struct inode *inode, struct file *filp,
 			   unsigned int iocmd, unsigned long ioarg)
 {
@@ -229,9 +259,9 @@ static int diagchar_ioctl(struct inode *inode, struct file *filp,
 				driver->table[i].subsys_id =
 					pkt_params->params->subsys_id;
 				driver->table[i].cmd_code_lo =
-					pkt_params->params->cmd_code_hi;
-				driver->table[i].cmd_code_hi =
 					pkt_params->params->cmd_code_lo;
+				driver->table[i].cmd_code_hi =
+					pkt_params->params->cmd_code_hi;
 				driver->table[i].process_id = current->tgid;
 				count_entries++;
 				if (pkt_params->count > count_entries)
@@ -258,9 +288,9 @@ static int diagchar_ioctl(struct inode *inode, struct file *filp,
 				driver->table[j].subsys_id = pkt_params->
 							params->subsys_id;
 				driver->table[j].cmd_code_lo = pkt_params->
-							params->cmd_code_hi;
-				driver->table[j].cmd_code_hi = pkt_params->
 							params->cmd_code_lo;
+				driver->table[j].cmd_code_hi = pkt_params->
+							params->cmd_code_hi;
 				driver->table[j].process_id = current->tgid;
 				count_entries++;
 				if (pkt_params->count > count_entries)
@@ -309,12 +339,14 @@ static int diagchar_ioctl(struct inode *inode, struct file *filp,
 							== NO_LOGGING_MODE) {
 			driver->in_busy_1 = 1;
 			driver->in_busy_2 = 1;
-			driver->in_busy_qdsp = 1;
+			driver->in_busy_qdsp_1 = 1;
+			driver->in_busy_qdsp_2 = 1;
 		} else if (temp == NO_LOGGING_MODE && driver->logging_mode
 							== MEMORY_DEVICE_MODE) {
 			driver->in_busy_1 = 0;
 			driver->in_busy_2 = 0;
-			driver->in_busy_qdsp = 0;
+			driver->in_busy_qdsp_1 = 0;
+			driver->in_busy_qdsp_2 = 0;
 			/* Poll SMD channels to check for data*/
 			if (driver->ch)
 				queue_work(driver->diag_wq,
@@ -327,7 +359,8 @@ static int diagchar_ioctl(struct inode *inode, struct file *filp,
 			diagfwd_disconnect();
 			driver->in_busy_1 = 0;
 			driver->in_busy_2 = 0;
-			driver->in_busy_qdsp = 0;
+			driver->in_busy_qdsp_2 = 0;
+			driver->in_busy_qdsp_2 = 0;
 			/* Poll SMD channels to check for data*/
 			if (driver->ch)
 				queue_work(driver->diag_wq,
@@ -340,6 +373,128 @@ static int diagchar_ioctl(struct inode *inode, struct file *filp,
 			diagfwd_connect();
 		success = 1;
 	}
+    //Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +[
+    else if (iocmd == DIAG_IOCTL_WRITE_BUFFER) 
+    {
+        struct diagpkt_ioctl_param pkt;
+        uint8_t *pBuf = NULL;
+        if (copy_from_user(&pkt, (void __user *)ioarg, sizeof(pkt)))
+        {
+            return -EFAULT;
+        }
+        if ((pBuf = kzalloc(4096, GFP_KERNEL)) == NULL)
+            return -EFAULT;
+
+        memcpy(pBuf, pkt.pPacket, pkt.Len);
+
+        diag_write_to_smd(pBuf, pkt.Len);
+        kfree(pBuf);
+        return 0;
+    }
+    else if (iocmd == DIAG_IOCTL_READ_BUFFER) 
+    {
+    struct diagpkt_ioctl_param pkt;
+    struct diagpkt_ioctl_param *ppkt;
+    uint8_t *pBuf = NULL;
+        if (copy_from_user(&pkt, (void __user *)ioarg, sizeof(pkt)))
+        {
+            return -EFAULT;
+        }
+
+        if ((pBuf = kzalloc(4096, GFP_KERNEL)) == NULL)
+            return -EFAULT;
+
+        ppkt = (struct diagpkt_ioctl_param *)ioarg;
+
+        if (diag_read_from_smd(pBuf, &(pkt.Len)) < 0)
+        {
+            kfree(pBuf);
+            return -EFAULT;
+        }
+        
+        if (copy_to_user((void __user *) &ppkt->Len, &pkt.Len, sizeof(pkt.Len)))
+        {
+            kfree(pBuf);
+            return -EFAULT;
+        }
+        if (copy_to_user((void __user *) pkt.pPacket, pBuf, pkt.Len))
+        {
+            kfree(pBuf);
+            return -EFAULT;
+        }
+        kfree(pBuf);
+        return 0;
+    }
+    else if (iocmd == DIAG_IOCTL_PASS_FIRMWARE_LIST)
+    {
+        FirmwareList FL;
+        FirmwareList * pFL = NULL;
+        int size;
+
+        if (copy_from_user(&FL, (void __user *)ioarg, sizeof(FL)+4))
+        {
+            return -EFAULT;
+        }
+
+        printk("update flag 0x%X\n",FL.iFLAG);
+        printk("image %s\n",FL.pCOMBINED_IMAGE);
+        printk("0x%08X 0x%08X\n", FL.aANDROID_BOOT[0], FL.aANDROID_BOOT[1]);
+        printk("FirmwareListChecksum(FL)=0x%08X, FirmwareListSize(FL)=%d\n", FL.checksum, sizeof(FL));
+		
+        // Fill smem_mem_type
+        proc_comm_alloc_sd_dl_smem(0);
+
+        size = sizeof(FirmwareList);
+        pFL = smem_alloc(SMEM_SD_IMG_UPGRADE_STATUS, size);
+
+        if (pFL == NULL)
+            return -EFAULT;
+
+        memcpy(pFL, &FL, sizeof(FirmwareList));
+        print_hex_dump(KERN_DEBUG, "", DUMP_PREFIX_OFFSET,16, 1, pFL, size, 0);
+
+        printk("0x%08X 0x%08X\n", pFL->aANDROID_BOOT[0], pFL->aANDROID_BOOT[1]);
+        printk("FirmwareListChecksum(pFL)=0x%08X, FirmwareListSize(pFL)=%d\n", pFL->checksum, size);
+        
+        return 0;
+    }
+    else if (iocmd == DIAG_IOCTL_GET_PART_TABLE_FROM_SMEM)
+    {
+        struct flash_partition_table *partition_table;
+        //struct flash_partition_entry *part_entry;
+        //struct mtd_partition *ptn = msm_nand_partitions;
+        //char *name = msm_nand_names;
+        //int part;
+
+        partition_table = (struct flash_partition_table *)
+            smem_alloc(SMEM_AARM_PARTITION_TABLE,
+        	       sizeof(struct flash_partition_table));
+
+        if (!partition_table) {
+            printk(KERN_WARNING "%s: no flash partition table in shared "
+                   "memory\n", __func__);
+            return -ENOENT;
+        }
+
+        if ((partition_table->magic1 != (u32) FLASH_PART_MAGIC1) ||
+            (partition_table->magic2 != (u32) FLASH_PART_MAGIC2) ||
+            (partition_table->version != (u32) FLASH_PARTITION_VERSION))
+        {
+        	printk(KERN_WARNING "%s: version mismatch -- magic1=%#x, "
+        	       "magic2=%#x, version=%#x\n", __func__,
+        	       partition_table->magic1,
+        	       partition_table->magic2,
+        	       partition_table->version);
+        	return -EFAULT;
+        }
+        if (copy_to_user((void __user *) ioarg, partition_table, sizeof(struct flash_partition_table)))
+        {
+            return -EFAULT;
+        }
+
+        return 0;
+    }
+    //Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +]
 
 	return success;
 }
@@ -434,15 +589,27 @@ drop:
 		}
 
 		/* copy q6 data */
-		if (driver->in_busy_qdsp == 1) {
+		if (driver->in_busy_qdsp_1 == 1) {
 			num_data++;
 			/*Copy the length of data being passed*/
 			COPY_USER_SPACE_OR_EXIT(buf+ret,
-				 (driver->usb_write_ptr_qdsp->length), 4);
+				 (driver->usb_write_ptr_qdsp_1->length), 4);
 			/*Copy the actual data being passed*/
 			COPY_USER_SPACE_OR_EXIT(buf+ret, *(driver->
-			usb_buf_in_qdsp), driver->usb_write_ptr_qdsp->length);
-			driver->in_busy_qdsp = 0;
+							usb_buf_in_qdsp_1),
+					 driver->usb_write_ptr_qdsp_1->length);
+			driver->in_busy_qdsp_1 = 0;
+		}
+		if (driver->in_busy_qdsp_2 == 1) {
+			num_data++;
+			/*Copy the length of data being passed*/
+			COPY_USER_SPACE_OR_EXIT(buf+ret,
+				 (driver->usb_write_ptr_qdsp_2->length), 4);
+			/*Copy the actual data being passed*/
+			COPY_USER_SPACE_OR_EXIT(buf+ret, *(driver->
+				usb_buf_in_qdsp_2), driver->
+					usb_write_ptr_qdsp_2->length);
+			driver->in_busy_qdsp_2 = 0;
 		}
 
 		/* copy number of data fields */
@@ -691,39 +858,67 @@ fail_free_copy:
 
 int mask_request_validate(unsigned char mask_buf[])
 {
-	if (mask_buf[4] == 0x1D || mask_buf[4] == 0x00 ||
-		mask_buf[4] == 0x7C || mask_buf[4] == 0x1C ||
-		mask_buf[4] == 0x0C || mask_buf[4] == 0x63 ||
-		mask_buf[4] == 0x73 || mask_buf[4] == 0x7D ||
-		mask_buf[4] == 0x81 || mask_buf[4] == 0x60 ||
-		mask_buf[4] == 0x82)
-			return 1;
-	else if (mask_buf[4] == 0x4B) {
-		switch (mask_buf[5]) {
-		case 0xF:
-		case 0x9:
-			if (mask_buf[6] == 0 && mask_buf[7] == 0)
+	uint8_t packet_id;
+	uint8_t subsys_id;
+	uint16_t ss_cmd;
+
+	packet_id = mask_buf[4];
+
+	if (packet_id == 0x4B) {
+		subsys_id = mask_buf[5];
+		ss_cmd = *(uint16_t *)(mask_buf + 6);
+		/* Packets with SSID which are allowed */
+		switch (subsys_id) {
+		case 0x04: /* DIAG_SUBSYS_WCDMA */
+			if ((ss_cmd == 0) || (ss_cmd == 0xF))
 				return 1;
-			else
-				return 0;
-		case 0x8:
-		case 0x13:
-			if ((mask_buf[6] == 1 || mask_buf[6] == 0) &&
-						 mask_buf[7] == 0)
+			break;
+		case 0x08: /* DIAG_SUBSYS_GSM */
+			if ((ss_cmd == 0) || (ss_cmd == 0x1))
 				return 1;
-			else
-				return 0;
-		case 0x4:
-			if ((mask_buf[6] == 0 || mask_buf[6] == 0xF) &&
-							 mask_buf[7] == 0)
+			break;
+		case 0x09: /* DIAG_SUBSYS_UMTS */
+		case 0x0F: /* DIAG_SUBSYS_CM */
+			if (ss_cmd == 0)
 				return 1;
-			else
-				return 0;
+			break;
+		case 0x0C: /* DIAG_SUBSYS_OS */
+			if ((ss_cmd == 2) || (ss_cmd == 0x100))
+				return 1; /* MPU and APU */
+			break;
+		case 0x12: /* DIAG_SUBSYS_DIAG_SERV */
+			if ((ss_cmd == 0) || (ss_cmd == 0x6) || (ss_cmd == 0x7))
+				return 1;
+			break;
+		case 0x13: /* DIAG_SUBSYS_FS */
+			if ((ss_cmd == 0) || (ss_cmd == 0x1))
+				return 1;
+			break;
 		default:
-				return 0;
+			return 0;
+			break;
 		}
-	} else
-		return 0;
+	} else {
+		switch (packet_id) {
+		case 0x00:    /* Version Number */
+		case 0x0C:    /* CDMA status packet */
+		case 0x1C:    /* Diag Version */
+		case 0x1D:    /* Time Stamp */
+		case 0x60:    /* Event Report Control */
+		case 0x63:    /* Status snapshot */
+		case 0x73:    /* Logging Configuration */
+		case 0x7C:    /* Extended build ID */
+		case 0x7D:    /* Extended Message configuration */
+		case 0x81:    /* Event get mask */
+		case 0x82:    /* Set the event mask */
+			return 1;
+			break;
+		default:
+			return 0;
+			break;
+		}
+	}
+	return 0;
 }
 
 static const struct file_operations diagcharfops = {

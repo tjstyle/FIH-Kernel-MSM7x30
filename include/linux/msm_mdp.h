@@ -41,6 +41,10 @@
 #define MSMFB_OVERLAY_GET      _IOR(MSMFB_IOCTL_MAGIC, 140, \
 						struct mdp_overlay)
 #define MSMFB_OVERLAY_PLAY_ENABLE     _IOW(MSMFB_IOCTL_MAGIC, 141, unsigned int)
+//SW2-6-MM-JH-Overlay_played-00+
+#define MSMFB_OVERLAY_PLAYED _IOWR(MSMFB_IOCTL_MAGIC, 142, int)
+#define MSMFB_MDP_HW_REVISION _IOWR(MSMFB_IOCTL_MAGIC, 143, int)
+//SW2-6-MM-JH-Overlay_played-00-
 
 #define MDP_IMGTYPE2_START 0x10000
 

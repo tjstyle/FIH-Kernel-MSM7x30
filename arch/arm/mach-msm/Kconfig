@@ -1,11 +1,8 @@
-if ARCH_MSM || ARCH_FSM
+if ARCH_MSM
 
 choice
 	prompt "MSM SoC Type"
-	default ARCH_MSM_NONE
-
-config ARCH_MSM_NONE
-	bool "MSM None"
+	default ARCH_MSM7X00A
 
 config ARCH_MSM7X01A
 	bool "MSM7x00A / MSM7x01A"
@@ -873,7 +870,7 @@ config MSM_CPU_AVS
 	bool "Enable Adaptive Voltage Scaling (AVS)"
 	depends on (ARCH_MSM_SCORPION && QSD_SVS)
 	depends on ARCH_QSD8X50
-	default y
+	default n
 	help
 	  This enables the Adaptive Voltage Scaling feature of
 	  Qualcomm ARMv7 CPUs. It adjusts the voltage for each frequency
@@ -1131,6 +1128,14 @@ config MSM_NPA_SYSTEM_BUS
 	help
 	  PM_QOS System Bus rate requests are interpreted as 'Flow IDs' and
 	  are routed through the NPA framework.
+
+config MSM_IDLE_WAIT_ON_MODEM
+	int "Wait for Modem to become ready for idle power collapse"
+	default 0
+	help
+	  If Modem is not ready to handle Application Processor's request
+	  for idle power collapse, wait the number of microseconds in case
+	  Modem becomes ready soon.
 
 config MSM_PIL
 	bool "Peripheral image loading"

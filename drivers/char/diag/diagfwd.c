@@ -30,10 +30,35 @@
 #include "diagfwd.h"
 #include "diagchar_hdlc.h"
 #include <linux/pm_runtime.h>
+#include "../../../arch/arm/mach-msm/proc_comm.h"    //Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +
+//+{PS3-RR-ON_DEVICE_QXDM-01
+#include <mach/dbgcfgtool.h>
+//PS3-RR-ON_DEVICE_QXDM-01}+
+
+#include <mach/msm_smd.h>  //SW-2-5-1-MP-DbgCfgTool-03+
+
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 *[
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/kthread.h>
+#include <linux/delay.h>
+#include <linux/rtc.h>
+
 
 MODULE_DESCRIPTION("Diag Char Driver");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("1.0");
+static DEFINE_SPINLOCK(smd_lock);
+static DECLARE_WAIT_QUEUE_HEAD(diag_wait_queue);
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 *]
+
+
+//SW-2-5-1-MP-DbgCfgTool-03+[
+#define  APPS_MODE_ANDROID   0x1
+#define  APPS_MODE_RECOVERY  0x2
+#define  APPS_MODE_FTM       0x3
+#define  APPS_MODE_UNKNOWN   0xFF
+//SW-2-5-1-MP-DbgCfgTool-03+]
 
 int diag_debug_buf_idx;
 unsigned char diag_debug_buf[1024];
@@ -44,6 +69,43 @@ static unsigned int buf_tbl_size = 8; /*Number of entries in table of buffers */
 
 #define CHK_OVERFLOW(bufStart, start, end, length) \
 ((bufStart <= start) && (end - start >= length)) ? 1 : 0
+
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +[
+#define WRITE_NV_4719_TO_ENTER_RECOVERY 1
+#ifdef WRITE_NV_4719_TO_ENTER_RECOVERY
+#define NV_FTM_MODE_BOOT_COUNT_I    4719
+
+unsigned int switch_efslog = 1;
+
+static ssize_t write_nv4179(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    unsigned int nv_value = 0;
+    unsigned int NVdata[3] = {NV_FTM_MODE_BOOT_COUNT_I, 0x1, 0x0};	
+
+    sscanf(buf, "%u\n", &nv_value);
+	
+    printk("paul %s: %d %u\n", __func__, count, nv_value);
+    NVdata[1] = nv_value;
+    fih_write_nv4719((unsigned *) NVdata);
+
+    return count;
+}
+DEVICE_ATTR(boot2recovery, 0644, NULL, write_nv4179);
+#endif
+
+static ssize_t OnOffEFS(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    unsigned int nv_value = 0;
+
+    sscanf(buf, "%u\n", &nv_value);
+    switch_efslog = nv_value;
+
+    printk("paul %s: %d %u\n", __func__, count, switch_efslog);
+    return count;
+}
+DEVICE_ATTR(turnonofffefslog, 0644, NULL, OnOffEFS);
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +]
+
 
 void __diag_smd_send_req(void)
 {
@@ -114,8 +176,8 @@ int diag_device_write(void *buf, int proc_num, struct diag_request *write_ptr)
 #endif
 			err = diag_write(write_ptr);
 		} else if (proc_num == QDSP_DATA) {
-			driver->usb_write_ptr_qdsp->buf = buf;
-			err = diag_write(driver->usb_write_ptr_qdsp);
+			write_ptr->buf = buf;
+			err = diag_write(write_ptr);
 		}
 		APPEND_DEBUG('k');
 	} else if (driver->logging_mode == MEMORY_DEVICE_MODE) {
@@ -150,7 +212,8 @@ int diag_device_write(void *buf, int proc_num, struct diag_request *write_ptr)
 			queue_work(driver->diag_wq, &(driver->
 							diag_read_smd_work));
 		} else if (proc_num == QDSP_DATA) {
-			driver->in_busy_qdsp = 0;
+			driver->in_busy_qdsp_1 = 0;
+			driver->in_busy_qdsp_2 = 0;
 			queue_work(driver->diag_wq, &(driver->
 						diag_read_smd_qdsp_work));
 		}
@@ -161,29 +224,47 @@ int diag_device_write(void *buf, int proc_num, struct diag_request *write_ptr)
 
 void __diag_smd_qdsp_send_req(void)
 {
-	void *buf;
+	void *buf = NULL;
+	int *in_busy_qdsp_ptr = NULL;
+	struct diag_request *write_ptr_qdsp = NULL;
 
-	if (driver->chqdsp && (!driver->in_busy_qdsp)) {
+	if (!driver->in_busy_qdsp_1) {
+		buf = driver->usb_buf_in_qdsp_1;
+		write_ptr_qdsp = driver->usb_write_ptr_qdsp_1;
+		in_busy_qdsp_ptr = &(driver->in_busy_qdsp_1);
+	} else if (!driver->in_busy_qdsp_2) {
+		buf = driver->usb_buf_in_qdsp_2;
+		write_ptr_qdsp = driver->usb_write_ptr_qdsp_2;
+		in_busy_qdsp_ptr = &(driver->in_busy_qdsp_2);
+	}
+
+	if (driver->chqdsp && buf) {
 		int r = smd_read_avail(driver->chqdsp);
 
 		if (r > USB_MAX_IN_BUF) {
-			printk(KERN_INFO "diag dropped num bytes = %d\n", r);
-			return;
-		}
-		if (r > 0) {
-			buf = driver->usb_buf_in_qdsp;
-			if (!buf) {
-				printk(KERN_INFO "Out of diagmem for q6\n");
+			if (r < MAX_BUF_SIZE) {
+				printk(KERN_ALERT "\n diag: SMD sending in "
+						   "packets upto %d bytes", r);
+				buf = krealloc(buf, r, GFP_KERNEL);
 			} else {
-				APPEND_DEBUG('l');
-				smd_read(driver->chqdsp, buf, r);
-				APPEND_DEBUG('m');
-				driver->usb_write_ptr_qdsp->length = r;
-				driver->in_busy_qdsp = 1;
-				diag_device_write(buf, QDSP_DATA, NULL);
+				printk(KERN_ALERT "\n diag: SMD sending in "
+				"packets more than %d bytes", MAX_BUF_SIZE);
+				return;
 			}
 		}
-
+		if (r > 0) {
+			if (!buf)
+				printk(KERN_INFO "Out of diagmem for a9\n");
+			else {
+				APPEND_DEBUG('i');
+				smd_read(driver->chqdsp, buf, r);
+				APPEND_DEBUG('j');
+				write_ptr_qdsp->length = r;
+				*in_busy_qdsp_ptr = 1;
+				diag_device_write(buf, QDSP_DATA,
+							 write_ptr_qdsp);
+			}
+		}
 	}
 }
 
@@ -502,7 +583,8 @@ int diagfwd_connect(void)
 	driver->usb_connected = 1;
 	driver->in_busy_1 = 0;
 	driver->in_busy_2 = 0;
-	driver->in_busy_qdsp = 0;
+	driver->in_busy_qdsp_1 = 0;
+	driver->in_busy_qdsp_2 = 0;
 
 	/* Poll SMD channels to check for data*/
 	queue_work(driver->diag_wq, &(driver->diag_read_smd_work));
@@ -522,7 +604,8 @@ int diagfwd_disconnect(void)
 	driver->usb_connected = 0;
 	driver->in_busy_1 = 1;
 	driver->in_busy_2 = 1;
-	driver->in_busy_qdsp = 1;
+	driver->in_busy_qdsp_1 = 1;
+	driver->in_busy_qdsp_2 = 1;
 	driver->debug_flag = 1;
 	diag_close();
 	/* TBD - notify and flow control SMD */
@@ -542,9 +625,13 @@ int diagfwd_write_complete(struct diag_request *diag_write_ptr)
 		driver->in_busy_2 = 0;
 		APPEND_DEBUG('O');
 		queue_work(driver->diag_wq, &(driver->diag_read_smd_work));
-	} else if (buf == (void *)driver->usb_buf_in_qdsp) {
-		driver->in_busy_qdsp = 0;
+	} else if (buf == (void *)driver->usb_buf_in_qdsp_1) {
+		driver->in_busy_qdsp_1 = 0;
 		APPEND_DEBUG('p');
+		queue_work(driver->diag_wq, &(driver->diag_read_smd_qdsp_work));
+	} else if (buf == (void *)driver->usb_buf_in_qdsp_2) {
+		driver->in_busy_qdsp_2 = 0;
+		APPEND_DEBUG('P');
 		queue_work(driver->diag_wq, &(driver->diag_read_smd_qdsp_work));
 	} else {
 		diagmem_free(driver, (unsigned char *)buf, POOL_TYPE_HDLC);
@@ -580,6 +667,77 @@ static struct diag_operations diagfwdops = {
 	.diag_char_read_complete = diagfwd_read_complete
 };
 
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +[
+#define DIAG_READ_RETRY_COUNT    100  //100 * 5 ms = 500ms
+int diag_read_from_smd(uint8_t * res_buf, int16_t* res_size)
+{
+    unsigned long flags;
+
+    int sz;
+    int gg = 0;
+    int retry = 0;
+    int rc = -1;
+
+    for(retry = 0; retry < DIAG_READ_RETRY_COUNT; )
+    {
+        sz = smd_cur_packet_size(driver->ch);
+
+        if (sz == 0)
+        {
+            msleep(5);
+            retry++;
+            continue;
+        }
+        gg = smd_read_avail(driver->ch);
+
+        if (sz > gg)
+        {
+            continue;
+        }
+        //if (sz > 535) {
+        //	smd_read(driver->ch, 0, sz);
+        //	continue;
+        //}
+
+        spin_lock_irqsave(&smd_lock, flags);//mutex_lock(&nmea_rx_buf_lock);
+        if (smd_read(driver->ch, res_buf, sz) == sz) {
+            spin_unlock_irqrestore(&smd_lock, flags);//mutex_unlock(&nmea_rx_buf_lock);
+            break;
+        }
+        //nmea_devp->bytes_read = sz;
+        spin_unlock_irqrestore(&smd_lock, flags);//mutex_unlock(&nmea_rx_buf_lock);
+    }
+    *res_size = sz;
+    if (retry >= DIAG_READ_RETRY_COUNT)
+    {
+        rc = -2;
+        goto lbExit;
+    }
+    rc = 0;
+lbExit:
+    return rc;
+}
+EXPORT_SYMBOL(diag_read_from_smd);
+
+void diag_write_to_smd(uint8_t * cmd_buf, int cmd_size)
+{
+	unsigned long flags;
+	int need;
+	//paul// need = sizeof(cmd_buf);
+	need = cmd_size;
+
+	spin_lock_irqsave(&smd_lock, flags);
+	while (smd_write_avail(driver->ch) < need) {
+		spin_unlock_irqrestore(&smd_lock, flags);
+		msleep(10);
+		spin_lock_irqsave(&smd_lock, flags);
+	}
+       smd_write(driver->ch, cmd_buf, cmd_size);
+       spin_unlock_irqrestore(&smd_lock, flags);
+}
+EXPORT_SYMBOL(diag_write_to_smd);
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +]
+
 static void diag_smd_notify(void *ctxt, unsigned event)
 {
 	queue_work(driver->diag_wq, &(driver->diag_read_smd_work));
@@ -596,38 +754,87 @@ static int diag_smd_probe(struct platform_device *pdev)
 {
 	int r = 0;
 
-	if (pdev->id == 0) {
-		if (driver->usb_buf_in_1 == NULL ||
-					 driver->usb_buf_in_2 == NULL) {
-			if (driver->usb_buf_in_1 == NULL)
-				driver->usb_buf_in_1 = kzalloc(USB_MAX_IN_BUF,
-								GFP_KERNEL);
-			if (driver->usb_buf_in_2 == NULL)
-				driver->usb_buf_in_2 = kzalloc(USB_MAX_IN_BUF,
-								GFP_KERNEL);
+//SW2-5-1-MP-DbgCfgTool-03*[
+//+{PS3-RR-ON_DEVICE_QXDM-01
+	int cfg_val;
+	int boot_mode;
+	
+	boot_mode = fih_read_boot_mode_from_smem();
+	if(boot_mode != APPS_MODE_FTM) {
+		r = DbgCfgGetByBit(DEBUG_MODEM_LOGGER_CFG, (int*)&cfg_val);
+		if ((r == 0) && (cfg_val == 1) && (boot_mode != APPS_MODE_RECOVERY)) {
+			printk(KERN_INFO "FIH:Embedded QXDM Enabled. %s", __FUNCTION__);
+		} else {
+			printk(KERN_ERR "FIH:Fail to call DbgCfgGetByBit(), ret=%d or Embedded QxDM disabled, cfg_val=%d.", r, cfg_val);
+			printk(KERN_ERR "FIH:Default: Embedded QXDM Disabled.\n");
+			if (pdev->id == 0) {
+				if (driver->usb_buf_in_1 == NULL ||
+							 driver->usb_buf_in_2 == NULL) {
+					if (driver->usb_buf_in_1 == NULL)
+						driver->usb_buf_in_1 = kzalloc(USB_MAX_IN_BUF,
+										GFP_KERNEL);
+					if (driver->usb_buf_in_2 == NULL)
+						driver->usb_buf_in_2 = kzalloc(USB_MAX_IN_BUF,
+										GFP_KERNEL);
+					if (driver->usb_buf_in_1 == NULL ||
+						 driver->usb_buf_in_2 == NULL)
+						goto err;
+					else
+						r = smd_open("DIAG", &driver->ch, driver,
+								 diag_smd_notify);
+				}
+				else
+					r = smd_open("DIAG", &driver->ch, driver,
+								 diag_smd_notify);
+			}
+		}
+	}
+	else {
+		if (pdev->id == 0) {
 			if (driver->usb_buf_in_1 == NULL ||
-				 driver->usb_buf_in_2 == NULL)
-				goto err;
+						 driver->usb_buf_in_2 == NULL) {
+				if (driver->usb_buf_in_1 == NULL)
+					driver->usb_buf_in_1 = kzalloc(USB_MAX_IN_BUF,
+									GFP_KERNEL);
+				if (driver->usb_buf_in_2 == NULL)
+					driver->usb_buf_in_2 = kzalloc(USB_MAX_IN_BUF,
+									GFP_KERNEL);
+				if (driver->usb_buf_in_1 == NULL ||
+					 driver->usb_buf_in_2 == NULL)
+					goto err;
+				else
+					r = smd_open("DIAG", &driver->ch, driver,
+							 diag_smd_notify);
+			}
 			else
 				r = smd_open("DIAG", &driver->ch, driver,
-						 diag_smd_notify);
+							 diag_smd_notify);
 		}
-		else
-			r = smd_open("DIAG", &driver->ch, driver,
-						 diag_smd_notify);
 	}
+//PS3-RR-ON_DEVICE_QXDM-01}+
+//SW2-5-1-MP-DbgCfgTool-03*]
+
 #if defined(CONFIG_MSM_N_WAY_SMD)
 	if (pdev->id == 1) {
-		if (driver->usb_buf_in_qdsp == NULL &&
-			(driver->usb_buf_in_qdsp =
-			kzalloc(USB_MAX_IN_BUF, GFP_KERNEL)) == NULL)
-
-			goto err;
+		if (driver->usb_buf_in_qdsp_1 == NULL ||
+					 driver->usb_buf_in_qdsp_2 == NULL) {
+			if (driver->usb_buf_in_qdsp_1 == NULL)
+				driver->usb_buf_in_qdsp_1 = kzalloc(
+						USB_MAX_IN_BUF, GFP_KERNEL);
+			if (driver->usb_buf_in_qdsp_2 == NULL)
+				driver->usb_buf_in_qdsp_2 = kzalloc(
+						USB_MAX_IN_BUF, GFP_KERNEL);
+			if (driver->usb_buf_in_qdsp_1 == NULL ||
+				 driver->usb_buf_in_qdsp_2 == NULL)
+				goto err;
+			else
+				r = smd_named_open_on_edge("DIAG", SMD_APPS_QDSP
+						, &driver->chqdsp, driver,
+							 diag_smd_qdsp_notify);
+		}
 		else
-
-		r = smd_named_open_on_edge("DIAG", SMD_APPS_QDSP,
-			&driver->chqdsp, driver, diag_smd_qdsp_notify);
-
+			r = smd_named_open_on_edge("DIAG", SMD_APPS_QDSP,
+			 &driver->chqdsp, driver, diag_smd_qdsp_notify);
 	}
 #endif
 	pm_runtime_set_active(&pdev->dev);
@@ -635,6 +842,23 @@ static int diag_smd_probe(struct platform_device *pdev)
 
 	printk(KERN_INFO "diag opened SMD port ; r = %d\n", r);
 
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +[
+#ifdef WRITE_NV_4719_TO_ENTER_RECOVERY
+	r = device_create_file(&pdev->dev, &dev_attr_boot2recovery);
+
+	if (r < 0)
+	{
+		dev_err(&pdev->dev, "%s: Create nv4719 attribute failed!! <%d>", __func__, r);
+	}
+#endif
+
+	r = device_create_file(&pdev->dev, &dev_attr_turnonofffefslog);
+
+	if (r < 0)
+	{
+		dev_err(&pdev->dev, "%s: Create turnonofffefslog attribute failed!! <%d>", __func__, r);
+	}
+//Div2D5-LC-BSP-Porting_OTA_SDDownload-00 +]
 err:
 	return 0;
 }
@@ -729,10 +953,15 @@ void diagfwd_init(void)
 			sizeof(struct diag_request), GFP_KERNEL);
 		if (driver->usb_write_ptr_2 == NULL)
 			goto err;
-	if (driver->usb_write_ptr_qdsp == NULL)
-		driver->usb_write_ptr_qdsp = kzalloc(
+	if (driver->usb_write_ptr_qdsp_1 == NULL)
+		driver->usb_write_ptr_qdsp_1 = kzalloc(
 			sizeof(struct diag_request), GFP_KERNEL);
-		if (driver->usb_write_ptr_qdsp == NULL)
+		if (driver->usb_write_ptr_qdsp_1 == NULL)
+			goto err;
+	if (driver->usb_write_ptr_qdsp_2 == NULL)
+		driver->usb_write_ptr_qdsp_2 = kzalloc(
+			sizeof(struct diag_request), GFP_KERNEL);
+		if (driver->usb_write_ptr_qdsp_2 == NULL)
 			goto err;
 	if (driver->usb_read_ptr == NULL)
 		driver->usb_read_ptr = kzalloc(
@@ -766,7 +995,8 @@ err:
 		kfree(driver->pkt_buf);
 		kfree(driver->usb_write_ptr_1);
 		kfree(driver->usb_write_ptr_2);
-		kfree(driver->usb_write_ptr_qdsp);
+		kfree(driver->usb_write_ptr_qdsp_1);
+		kfree(driver->usb_write_ptr_qdsp_2);
 		kfree(driver->usb_read_ptr);
 }
 
@@ -786,7 +1016,8 @@ void diagfwd_exit(void)
 
 	kfree(driver->usb_buf_in_1);
 	kfree(driver->usb_buf_in_2);
-	kfree(driver->usb_buf_in_qdsp);
+	kfree(driver->usb_buf_in_qdsp_1);
+	kfree(driver->usb_buf_in_qdsp_2);
 	kfree(driver->usb_buf_out);
 	kfree(driver->hdlc_buf);
 	kfree(driver->msg_masks);
@@ -799,6 +1030,7 @@ void diagfwd_exit(void)
 	kfree(driver->pkt_buf);
 	kfree(driver->usb_write_ptr_1);
 	kfree(driver->usb_write_ptr_2);
-	kfree(driver->usb_write_ptr_qdsp);
+	kfree(driver->usb_write_ptr_qdsp_1);
+	kfree(driver->usb_write_ptr_qdsp_2);
 	kfree(driver->usb_read_ptr);
 }

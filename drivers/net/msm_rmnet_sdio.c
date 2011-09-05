@@ -41,34 +41,48 @@
 
 #define DEBUG
 
-static int msm_rmnet_sdio_debug_mask;
-module_param_named(debug_mask, msm_rmnet_sdio_debug_mask,
+static int msm_rmnet_sdio_debug_enable;
+module_param_named(debug_enable, msm_rmnet_sdio_debug_enable,
 		   int, S_IRUGO | S_IWUSR | S_IWGRP);
 
 #if defined(DEBUG)
 static uint32_t msm_rmnet_sdio_read_cnt;
 static uint32_t msm_rmnet_sdio_write_cnt;
+static uint32_t msm_rmnet_sdio_write_cpy_cnt;
+static uint32_t msm_rmnet_sdio_write_cpy_bytes;
 
-#define DBG(x...) do {		                \
-		if (msm_rmnet_sdio_debug_mask)	\
-			printk(KERN_DEBUG x);	\
+#define DBG(x...) do {		                 \
+		if (msm_rmnet_sdio_debug_enable) \
+			pr_debug(x);	         \
 	} while (0)
 
-#define DBG_INC_READ_CNT(x) do {	                       \
-		msm_rmnet_sdio_read_cnt += (x);                \
-		printk(KERN_DEBUG "%s: total read bytes %u\n", \
-		       __func__, msm_rmnet_sdio_read_cnt);     \
+#define DBG_INC_READ_CNT(x) do {	                               \
+		msm_rmnet_sdio_read_cnt += (x);                        \
+		if (msm_rmnet_sdio_debug_enable)                       \
+			pr_debug("%s: total read bytes %u\n",          \
+				 __func__, msm_rmnet_sdio_read_cnt);   \
 	} while (0)
 
-#define DBG_INC_WRITE_CNT(x)  do {	                          \
-		msm_rmnet_sdio_write_cnt += (x);                  \
-		printk(KERN_DEBUG "%s: total written bytes %u\n", \
-		       __func__, msm_rmnet_sdio_write_cnt);	  \
+#define DBG_INC_WRITE_CNT(x)  do {	                                  \
+		msm_rmnet_sdio_write_cnt += (x);                          \
+		if (msm_rmnet_sdio_debug_enable)                          \
+			pr_debug("%s: total written bytes %u\n",          \
+				 __func__, msm_rmnet_sdio_write_cnt);	  \
+	} while (0)
+
+#define DBG_INC_WRITE_CPY(x)  do {	                                     \
+		msm_rmnet_sdio_write_cpy_bytes += (x);                       \
+		msm_rmnet_sdio_write_cpy_cnt++;                              \
+		if (msm_rmnet_sdio_debug_enable)                             \
+			pr_debug("%s: total write copy cnt %u, bytes %u\n",  \
+				 __func__, msm_rmnet_sdio_write_cpy_cnt,     \
+				 msm_rmnet_sdio_write_cpy_bytes);            \
 	} while (0)
 #else
 #define DBG(x...) do { } while (0)
 #define DBG_INC_READ_CNT(x...) do { } while (0)
 #define DBG_INC_WRITE_CNT(x...) do { } while (0)
+#define DBG_INC_WRITE_CPY(x...) do { } while (0)
 #endif
 
 struct sdio_ch_info {
@@ -270,12 +284,20 @@ static void sdio_mux_read_data(struct work_struct *work)
 	/* net_ip_aling is probably not required */
 	if (sdio_partial_pkt.valid)
 		len = sdio_partial_pkt.skb->len;
-	skb_mux = dev_alloc_skb(sz + NET_IP_ALIGN + len);
-	if (skb_mux == NULL) {
-		pr_err("%s: cannot allocate skb\n", __func__);
-		mutex_unlock(&sdio_mux_lock);
-		return;
-	}
+	/* if allocation fails attempt to get a smaller chunk of mem */
+	do {
+		skb_mux = dev_alloc_skb(sz + NET_IP_ALIGN + len);
+		if (skb_mux)
+			break;
+		pr_err("%s: cannot allocate skb of size:%d\n", __func__,
+			sz + NET_IP_ALIGN + len);
+		if (sz + NET_IP_ALIGN + len <= PAGE_SIZE) {
+			pr_err("%s: allocation failed\n", __func__);
+			mutex_unlock(&sdio_mux_lock);
+			return;
+		}
+		sz /= 2;
+	} while (1);
 
 	skb_reserve(skb_mux, NET_IP_ALIGN + len);
 	ptr = skb_put(skb_mux, sz);
@@ -400,6 +422,7 @@ int msm_rmnet_sdio_write(uint32_t id, struct sk_buff *skb)
 	int rc = 0;
 	struct sdio_mux_hdr *hdr;
 	unsigned long flags;
+	struct sk_buff *new_skb;
 
 	if (!skb)
 		return -EINVAL;
@@ -416,6 +439,22 @@ int msm_rmnet_sdio_write(uint32_t id, struct sk_buff *skb)
 		pr_err("%s: packet pending ch: %d\n", __func__, id);
 		rc = -EPERM;
 		goto write_done;
+	}
+
+	/* if skb do not have any tailroom for padding,
+	   copy the skb into a new expanded skb */
+	if ((skb->len & 0x3) && (skb_tailroom(skb) < (4 - (skb->len & 0x3)))) {
+		/* revisit, probably dev_alloc_skb and memcpy is effecient */
+		new_skb = skb_copy_expand(skb, skb_headroom(skb),
+					  4 - (skb->len & 0x3), GFP_KERNEL);
+		if (new_skb == NULL) {
+			pr_err("%s: cannot allocate skb\n", __func__);
+			rc = -ENOMEM;
+			goto write_done;
+		}
+		dev_kfree_skb_any(skb);
+		skb = new_skb;
+		DBG_INC_WRITE_CPY(skb->len);
 	}
 
 	hdr = (struct sdio_mux_hdr *)skb_push(skb, sizeof(struct sdio_mux_hdr));

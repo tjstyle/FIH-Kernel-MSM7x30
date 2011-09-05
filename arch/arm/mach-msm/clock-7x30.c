@@ -112,22 +112,22 @@
 
 
 /* MUX source input identifiers. */
-#define SRC_PLL0	4 /* Modem PLL */
-#define SRC_PLL1	1 /* Global PLL */
-#define SRC_PLL3	3 /* Multimedia/Peripheral PLL or Backup PLL1 */
-#define SRC_PLL4	2 /* Display PLL */
-#define SRC_LPXO	6 /* Low-power XO */
-#define SRC_TCXO	0 /* Used for sources that always source from TCXO */
-#define SRC_AXI		0 /* Used for rates that sync to AXI */
+#define SRC_SEL_PLL0	4 /* Modem PLL */
+#define SRC_SEL_PLL1	1 /* Global PLL */
+#define SRC_SEL_PLL3	3 /* Multimedia/Peripheral PLL or Backup PLL1 */
+#define SRC_SEL_PLL4	2 /* Display PLL */
+#define SRC_SEL_LPXO	6 /* Low-power XO */
+#define SRC_SEL_TCXO	0 /* Used for sources that always source from TCXO */
+#define SRC_SEL_AXI	0 /* Used for rates that sync to AXI */
 
 /* Source name to PLL mappings. */
-#define SRC_SEL_PLL0	PLL_0
-#define SRC_SEL_PLL1	PLL_1
-#define SRC_SEL_PLL3	PLL_3
-#define SRC_SEL_PLL4	PLL_4
-#define SRC_SEL_LPXO	LPXO
-#define SRC_SEL_TCXO	TCXO
-#define SRC_SEL_AXI	AXI
+#define SRC_PLL0	PLL_0
+#define SRC_PLL1	PLL_1
+#define SRC_PLL3	PLL_3
+#define SRC_PLL4	PLL_4
+#define SRC_LPXO	LPXO
+#define SRC_TCXO	TCXO
+#define SRC_AXI		AXI
 
 /* Clock declaration macros. */
 #define MN_MODE_DUAL_EDGE	0x2
@@ -177,15 +177,19 @@ static struct clk_freq_tbl clk_tbl_uartdm[] = {
 	F_MND16( 3686400, PLL3, 3,   3, 200, NOMINAL),
 	F_MND16( 7372800, PLL3, 3,   3, 100, NOMINAL),
 	F_MND16(14745600, PLL3, 3,   3,  50, NOMINAL),
+	F_MND16(32000000, PLL3, 3,  25, 192, NOMINAL),
+	F_MND16(40000000, PLL3, 3, 125, 768, NOMINAL),
 	F_MND16(46400000, PLL3, 3, 145, 768, NOMINAL),
+	F_MND16(48000000, PLL3, 3,  25, 128, NOMINAL),
 	F_MND16(51200000, PLL3, 3,   5,  24, NOMINAL),
+	F_MND16(56000000, PLL3, 3, 175, 768, NOMINAL),
 	F_MND16(58982400, PLL3, 3,   6,  25, NOMINAL),
 	F_MND16(64000000, PLL1, 4,   1,   3, NOMINAL),
 	F_END,
 };
 
 static struct clk_freq_tbl clk_tbl_mdh[] = {
-	F_BASIC( 73728000, PLL3, 10, NOMINAL),
+	F_BASIC( 49150000, PLL3, 15, NOMINAL),
 	F_BASIC( 92160000, PLL3,  8, NOMINAL),
 	F_BASIC(122880000, PLL3,  6, NOMINAL),
 	F_BASIC(184320000, PLL3,  4, NOMINAL),
@@ -255,7 +259,9 @@ static struct clk_freq_tbl clk_tbl_mdp_core[] = {
 static struct clk_freq_tbl clk_tbl_mdp_lcdc[] = {
 	F_MND16(24576000, LPXO, 1,   0,   0, NOMINAL),
 	F_MND16(30720000, PLL3, 4,   1,   6, NOMINAL),
+	F_MND16(32768000, PLL3, 3,   2,  15, NOMINAL),
 	F_MND16(40960000, PLL3, 2,   1,   9, NOMINAL),
+	F_MND16(73728000, PLL3, 2,   1,   5, NOMINAL),
 	F_END,
 };
 
@@ -573,6 +579,8 @@ static struct clk_local soc_clk_local_tbl_7x30[] = {
 	/* Peripheral bus clocks. */
 	CLK_GLBL(ADM,		GLBL_CLK_ENA_SC_REG,	B(5),
 				GLBL_CLK_STATE_REG,	DELAY, 0, 0x4000),
+	CLK_GLBL(CE,		GLBL_CLK_ENA_SC_REG,	B(6),
+				GLBL_CLK_STATE_REG,	HALT_VOTED, 6, 0x4D43),
 	CLK_GLBL(CAMIF_PAD_P,	GLBL_CLK_ENA_SC_REG,	B(9),
 				GLBL_CLK_STATE_REG,	HALT, 9, 0x1A),
 	CLK_GLBL(CSI0_P,	GLBL_CLK_ENA_SC_REG,	B(30),
@@ -1054,6 +1062,7 @@ static const struct clk_local_ownership {
 	[C(VPE)]			= { O(SH2_OWN_APPS3), B(4) },
 
 	[C(ADM)]			= { O(SH2_OWN_GLBL), B(8) },
+	[C(CE)]				= { O(SH2_OWN_GLBL), B(8) },
 	[C(AXI_ROTATOR)]		= { O(SH2_OWN_GLBL), B(13) },
 	[C(ROTATOR_IMEM)]		= { O(SH2_OWN_GLBL), B(13) },
 	[C(ROTATOR_P)]			= { O(SH2_OWN_GLBL), B(13) },
@@ -1153,16 +1162,19 @@ void __init msm_clk_soc_init(void)
 		writel(val, ri_list[i].reg);
 	}
 
-	/* This is just to update the driver data structures. The actual
-	 * register set up is taken care of in the register init loop
-	 * or is the default value out of reset. */
 	set_1rate(I2C);
 	set_1rate(I2C_2);
 	set_1rate(QUP_I2C);
 	set_1rate(UART1);
 	set_1rate(UART2);
+	set_1rate(MI2S_M);
+	set_1rate(MIDI);
+	set_1rate(MDP_VSYNC);
 	set_1rate(LPA_CODEC);
 	set_1rate(GLBL_ROOT);
+
+	/* Sync the GRP2D clock to AXI */
+	local_clk_set_rate(C(GRP_2D), 1);
 }
 
 /*

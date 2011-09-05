@@ -425,6 +425,12 @@ static int device_resume(struct device *dev, pm_message_t state)
 			error = pm_op(dev, dev->class->pm, state);
 		} else if (dev->class->resume) {
 			pm_dev_dbg(dev, state, "legacy class ");
+
+//Div2-SW2-BSP-SuspendLog, VinceCCTsai+[
+#ifdef CONFIG_FIH_SUSPEND_RESUME_LOG
+            print_symbol("class resume: %s\n", (unsigned long)dev->class->resume);
+#endif
+//Div2-SW2-BSP-SuspendLog, VinceCCTsai-]
 			error = dev->class->resume(dev);
 		}
 	}
@@ -683,6 +689,13 @@ static int device_suspend(struct device *dev, pm_message_t state)
 			error = pm_op(dev, dev->class->pm, state);
 		} else if (dev->class->suspend) {
 			pm_dev_dbg(dev, state, "legacy class ");
+
+//Div2-SW2-BSP-SuspendLog, VinceCCTsai+[
+#ifdef CONFIG_FIH_SUSPEND_RESUME_LOG
+            print_symbol("class suspend: %s\n", (unsigned long)dev->class->suspend);
+#endif
+//Div2-SW2-BSP-SuspendLog, VinceCCTsai-]
+
 			error = dev->class->suspend(dev, state);
 			suspend_report_result(dev->class->suspend, error);
 		}
@@ -714,6 +727,19 @@ static int device_suspend(struct device *dev, pm_message_t state)
 
 	return error;
 }
+//DIV5-CONN-MW-POWER SAVING MODE-06+[	
+#if defined(CONFIG_FIH_PROJECT_SF4Y6) && defined(CONFIG_FIH_WIMAX_GCT_SDIO)
+enum {
+             GDM_SYS_SUSPEND = 1,
+             GDM_SYS_RESUME,
+             GDM_WIMAX_SUSPEND,
+             GDM_WIMAX_RESUME
+};
+extern void (*gdm_wimax_pm_event)(int);
+EXPORT_SYMBOL(gdm_wimax_pm_event);
+#endif
+//DIV5-CONN-MW-POWER SAVING MODE-06+]
+
 
 /**
  * dpm_suspend - Execute "suspend" callbacks for all non-sysdev devices.
@@ -723,7 +749,16 @@ static int dpm_suspend(pm_message_t state)
 {
 	struct list_head list;
 	int error = 0;
-
+//DIV5-CONN-MW-POWER SAVING MODE-06+[	
+#if defined(CONFIG_FIH_PROJECT_SF4Y6) && defined(CONFIG_FIH_WIMAX_GCT_SDIO)		
+        if (gdm_wimax_pm_event)	
+        {
+            gdm_wimax_pm_event(GDM_WIMAX_SUSPEND);
+            printk(KERN_INFO "%s: --> gdm_wimax_pm_event(GDM_WIMAX_SUSPEND) \n", __func__);  	
+        }
+#endif
+//DIV5-CONN-MW-POWER SAVING MODE-06+]
+	
 	INIT_LIST_HEAD(&list);
 	mutex_lock(&dpm_list_mtx);
 	while (!list_empty(&dpm_list)) {
@@ -854,10 +889,15 @@ static int dpm_prepare(pm_message_t state)
  * Prepare all non-sysdev devices for system PM transition and execute "suspend"
  * callbacks for them.
  */
+ //DIV5-CONN-MW-POWER SAVING MODE-04-[
+
+ //DIV5-CONN-MW-POWER SAVING MODE-04-]
 int dpm_suspend_start(pm_message_t state)
 {
 	int error;
-
+ //DIV5-CONN-MW-POWER SAVING MODE-04-[
+ 	
+ //DIV5-CONN-MW-POWER SAVING MODE-04-]	
 	might_sleep();
 	error = dpm_prepare(state);
 	if (!error)

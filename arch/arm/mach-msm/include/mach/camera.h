@@ -197,8 +197,9 @@ struct msm_queue_cmd {
 	struct list_head list_vpe_frame;
 	enum msm_queue type;
 	void *command;
-	int on_heap;
+	atomic_t on_heap;
 	struct timespec ts;
+	uint32_t error_code;
 };
 
 struct msm_device_queue {
@@ -251,6 +252,7 @@ struct msm_sync {
 
 	atomic_t vpe_enable;
 	uint32_t pp_mask;
+	uint8_t pp_frame_avail;
 	struct msm_queue_cmd *pp_prev;
 	struct msm_queue_cmd *pp_snap;
 	struct msm_queue_cmd *pp_thumb;
@@ -261,6 +263,10 @@ struct msm_sync {
 	struct mutex lock;
 	struct list_head list;
 	uint8_t liveshot_enabled;
+
+	spinlock_t pmem_frame_spinlock;
+	spinlock_t pmem_stats_spinlock;
+	spinlock_t abort_pict_lock;
 };
 
 #define MSM_APPS_ID_V4L2 "msm_v4l2"
@@ -427,6 +433,7 @@ int  msm_camio_clk_disable(enum msm_camio_clk_type clk);
 int  msm_camio_clk_config(uint32_t freq);
 void msm_camio_clk_rate_set(int rate);
 void msm_camio_clk_rate_set_2(struct clk *clk, int rate);
+void msm_camio_clk_set_min_rate(struct clk *clk, int rate);
 void msm_camio_clk_axi_rate_set(int rate);
 void msm_disable_io_gpio_clk(struct platform_device *);
 
@@ -439,6 +446,8 @@ void msm_camio_clk_sel(enum msm_camio_clk_src_type);
 void msm_camio_disable(struct platform_device *);
 int msm_camio_probe_on(struct platform_device *);
 int msm_camio_probe_off(struct platform_device *);
+int msm_camio_sensor_clk_off(struct platform_device *);
+int msm_camio_sensor_clk_on(struct platform_device *);
 int msm_camio_csi_config(struct msm_camera_csi_params *csi_params);
 int add_axi_qos(void);
 int update_axi_qos(uint32_t freq);

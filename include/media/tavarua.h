@@ -43,7 +43,7 @@
 #include <linux/videodev2.h>
 
 
-#undef FM_DEBUG
+#define FM_DEBUG
 
 /* constants */
 #define  RDS_BLOCKS_NUM             (4)
@@ -71,6 +71,16 @@
   #define FMDBG(fmt, args...)
 #endif
 
+#undef FMDERR
+#define FMDERR(fmt, args...) printk(KERN_INFO "tavarua_radio: " fmt, ##args)
+
+#undef FMDBG_I2C
+#ifdef FM_DEBUG_I2C
+  #define FMDBG_I2C(fmt, args...) printk(KERN_INFO "fm_i2c: " fmt, ##args)
+#else
+  #define FMDBG_I2C(fmt, args...)
+#endif
+
 /* function declarations */
 /* FM Core audio paths. */
 #define TAVARUA_AUDIO_OUT_ANALOG_OFF	(0)
@@ -78,13 +88,18 @@
 #define TAVARUA_AUDIO_OUT_DIGITAL_OFF	(0)
 #define TAVARUA_AUDIO_OUT_DIGITAL_ON	(1)
 
+/* FIHTDC, Div2-SW2-BSP Godfrey, FB0.B-396 */
+int enableGPS_FM_LNA(int bEnable);
+
 int tavarua_set_audio_path(int digital_on, int analog_on);
 
 /* defines and enums*/
 
 #define MARIMBA_A0 0x01010013
 #define MARIMBA_2_1 0x02010204
-#define WAIT_TIMEOUT 2000
+// FIHTDC, Div2-SW2-BSP Godfrey
+//#define WAIT_TIMEOUT 2000
+#define WAIT_TIMEOUT 500
 #define RADIO_INIT_TIME 15
 #define TAVARUA_DELAY 10
 /*
@@ -291,7 +306,11 @@ enum radio_state_t {
 /* interrupt register 3 */
 #define	TRANSFER	(1 << 0) /* Data transfer (XFR) completed */
 #define	RDSPROC		(1 << 1) /* Dynamic RDS Processing complete */
+
+/* FIHTDC, Div2-SW2-BSP Godfrey */
+#ifndef ERROR
 #define	ERROR		(1 << 7) /* Err occurred.Read code to determine cause */
+#endif
 
 /* Transfer */
 enum tavarua_xfr_ctrl_t {

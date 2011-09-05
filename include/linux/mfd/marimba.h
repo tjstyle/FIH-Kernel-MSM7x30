@@ -78,11 +78,14 @@ struct marimba_fm_platform_data{
 	int (*fm_setup)(struct marimba_fm_platform_data *pdata);
 	void (*fm_shutdown)(struct marimba_fm_platform_data *pdata);
 	struct vreg *vreg_s2;
+	/* FIHTDC, Div2-SW2-BSP Godfrey, FM  */
+	struct vreg *vreg_gp16;
 	struct vreg *vreg_xo_out;
 };
 
 struct marimba_codec_platform_data{
 	int (*marimba_codec_power)(int vreg_on);
+	void (*snddev_profile_init) (void);
 };
 
 struct marimba_tsadc_setup_params {

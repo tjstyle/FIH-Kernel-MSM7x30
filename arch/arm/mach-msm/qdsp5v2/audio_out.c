@@ -39,6 +39,7 @@
 
 #include <mach/htc_pwrsink.h>
 #include <mach/debug_mm.h>
+#include<linux/fih_hw_info.h> //MM-RC-ChangeFMPath-00+
 
 #define BUFSZ (960 * 5)
 #define DMASZ (BUFSZ * 2)
@@ -332,6 +333,7 @@ static long audio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	struct audio *audio = file->private_data;
 	int rc = -EINVAL;
 	unsigned long flags = 0;
+	int pid =0;//MM-RC-DualMicOrNot-00+
 
 	if (cmd == AUDIO_GET_STATS) {
 		struct msm_audio_stats stats;
@@ -427,6 +429,19 @@ static long audio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		rc = 0;
 		break;
 	}
+	//MM-RC-DualMicOrNot-00+{
+	case GET_DUAL_MIC_SETTING:
+    		pid = fih_get_product_id();
+		printk("GET_DUAL_MIC_SETTING pid=%d\n",pid);
+		printk("Product_SF5 pid=%d\n",Product_SF5);
+		printk("Product_SF6 pid=%d\n",Product_SF6);
+		if((pid==Product_SF5)||(pid==Product_SF6)||IS_SF8_SERIES_PRJ())
+			rc = 0;
+		else
+			rc = 1;
+		printk("rc=%d\n",rc);
+		break;
+	//MM-RC-DualMicOrNot-00+}
 	default:
 		rc = -EINVAL;
 	}

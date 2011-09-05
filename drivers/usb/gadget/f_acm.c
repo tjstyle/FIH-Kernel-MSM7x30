@@ -15,11 +15,25 @@
 
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/usb/android_composite.h>
+
+#include <linux/module.h>
+#include <linux/init.h>
+#include <linux/poll.h>
+#include <linux/delay.h>
+#include <linux/wait.h>
+#include <linux/err.h>
+#include <linux/interrupt.h>
+#include <linux/types.h>
+#include <linux/miscdevice.h>
+#include <linux/io.h>
+#include <asm/uaccess.h>
+
 
 #include "u_serial.h"
 #include "gadget_chips.h"
 
-
+#define ACM_TURNOFF 1
 /*
  * This CDC ACM function support just wraps control functions and
  * notifications around the generic serial-over-usb code.
@@ -261,6 +275,49 @@ static struct usb_gadget_strings *acm_strings[] = {
 	&acm_string_table,
 	NULL,
 };
+
+static struct f_acm *_acm_dev ;
+
+static int acm_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
+{
+	int ret = 0;	
+	void __user *argp = (void __user *)arg;	
+	int value;
+	
+	printk("[cch] %s +\n", __func__);
+	switch (cmd) 
+	{
+		case ACM_TURNOFF:
+		{
+			if(copy_from_user(&value, argp, sizeof(value)))
+				return -1; 			
+			
+			if(value == 1 || value == 0)
+			{
+				printk("[cch] %s android_enable_function value:%d\n", __func__, value);
+				android_enable_function(&_acm_dev->port.func, value);
+			}
+				//support_sd_removal_turnoff = value;
+		}
+		break;
+		default:
+			break;
+	}
+	printk("[cch] %s -\n", __func__);
+	return ret;
+}
+
+static struct file_operations acm_fops = {
+	.owner =   THIS_MODULE,
+	.ioctl =   acm_ioctl,
+};
+
+static struct miscdevice acm_device = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "acm",
+	.fops = &acm_fops,
+};
+
 
 /*-------------------------------------------------------------------------*/
 
@@ -740,6 +797,7 @@ acm_unbind(struct usb_configuration *c, struct usb_function *f)
 		usb_free_descriptors(f->hs_descriptors);
 	usb_free_descriptors(f->descriptors);
 	gs_free_req(acm->notify, acm->notify_req);
+	misc_deregister(&acm_device);
 	kfree(acm);
 }
 
@@ -825,8 +883,52 @@ int acm_bind_config(struct usb_configuration *c, u8 port_num)
 	acm->port.func.setup = acm_setup;
 	acm->port.func.disable = acm_disable;
 
+	_acm_dev = acm;
+	
+	status = misc_register(&acm_device);
+	if (status)
+	{
+		goto err;	
+	}
+
 	status = usb_add_function(c, &acm->port.func);
 	if (status)
 		kfree(acm);
 	return status;
+
+err:
+	misc_deregister(&acm_device);
+	return status;
 }
+
+void enable_acm(bool isEnable)
+{
+	android_enable_function(&_acm_dev->port.func, isEnable);	
+}
+EXPORT_SYMBOL(enable_acm);
+
+int facm_acm_bind_config(struct usb_configuration *c)
+{
+	int ret;
+	printk("[cch] %s +\n", __func__);
+	ret = gserial_setup(c->cdev->gadget, 1);
+	if (ret)
+		return ret;
+	
+	printk("[cch] %s -\n", __func__);
+	return acm_bind_config(c, 0);	
+}
+
+static struct android_usb_function acm_function = {
+	.name = "acm",
+	.bind_config = facm_acm_bind_config,
+};
+
+static int __init init(void)
+{
+	printk(KERN_INFO "f_acm init\n");
+
+	android_register_function(&acm_function);
+	return 0;
+}
+module_init(init);

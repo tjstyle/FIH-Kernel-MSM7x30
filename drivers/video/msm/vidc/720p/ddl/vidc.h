@@ -2193,6 +2193,7 @@ VIDC_REG_1137_METADATA_DISPLAY_INDEX_SHFT          0
 #define VIDC_720P_PROFILE_H264_BASELINE 0
 #define VIDC_720P_PROFILE_H264_MAIN     1
 #define VIDC_720P_PROFILE_H264_HIGH     2
+#define VIDC_720P_PROFILE_H264_CPB      3
 #define VIDC_720P_PROFILE_H263_BASELINE 0
 
 #define VIDC_720P_PROFILE_VC1_SP        0
@@ -2330,7 +2331,7 @@ enum vidc_720p_display_status {
 	VIDC_720P_DECODE_ONLY = 0,
 	VIDC_720P_DECODE_AND_DISPLAY = 1,
 	VIDC_720P_DISPLAY_ONLY = 2,
-  VIDC_720P_EMPTY_BUFFER = 3
+	VIDC_720P_EMPTY_BUFFER = 3
 };
 
 #define VIDC_720P_ENC_IFRAME_REQ       0x1
@@ -2506,7 +2507,8 @@ void vidc_720p_enc_frame_info
 
 void vidc_720p_decode_bitstream_header(u32 ch_id, u32 dec_unit_size,
 	u32 start_byte_num, u32 ext_buffer_start, u32 ext_buffer_end,
-	enum vidc_720p_memory_access_method memory_access_model);
+	enum vidc_720p_memory_access_method memory_access_model,
+	u32 decode_order);
 
 void vidc_720p_decode_get_seq_hdr_info
     (struct vidc_720p_seq_hdr_info *seq_hdr_info);

@@ -203,8 +203,6 @@ kgsl_g12_init(struct kgsl_device *device,
 {
 	int status = -EINVAL;
 	struct kgsl_memregion *regspace = &device->regspace;
-	unsigned int memflags = KGSL_MEMFLAGS_ALIGNPAGE |
-				KGSL_MEMFLAGS_CONPHYS;
 	struct kgsl_g12_device *g12_device = (struct kgsl_g12_device *) device;
 
 
@@ -287,9 +285,8 @@ kgsl_g12_init(struct kgsl_device *device,
 	if (status != 0)
 		goto error_close_cmdstream;
 
-	status = kgsl_sharedmem_alloc(memflags, sizeof(device->memstore),
-					&device->memstore);
-
+	status = kgsl_sharedmem_alloc_coherent(&device->memstore,
+						sizeof(device->memstore));
 	if (status != 0)
 		goto error_close_mmu;
 
@@ -396,14 +393,14 @@ static int kgsl_g12_stop(struct kgsl_device *device)
 {
 	kgsl_g12_idle(device, KGSL_TIMEOUT_DEFAULT);
 
-	kgsl_pwrctrl(KGSL_PWRFLAGS_G12_IRQ_OFF);
-
 	del_timer(&device->idle_timer);
 
 	kgsl_mmu_stop(device);
 
+	kgsl_pwrctrl(KGSL_PWRFLAGS_G12_IRQ_OFF);
 	kgsl_pwrctrl(KGSL_PWRFLAGS_G12_CLK_OFF);
 	kgsl_pwrctrl(KGSL_PWRFLAGS_G12_POWER_OFF);
+	device->hwaccess_blocked = KGSL_TRUE;
 
 	device->flags &= ~KGSL_FLAGS_STARTED;
 	return 0;
@@ -686,7 +683,7 @@ int __init kgsl_g12_config(struct kgsl_devconfig *devconfig,
 
 	/*find memory regions */
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-			"kgsl_g12_reg_memory");
+			"kgsl_2d0_reg_memory");
 	if (res == NULL) {
 		KGSL_DRV_ERR("platform_get_resource_byname failed\n");
 		result = -EINVAL;

@@ -113,6 +113,7 @@ struct audio_in {
 	uint32_t in_count; /* number of buffers available to read() */
 	uint32_t mode;
 	uint32_t eos_ack;
+	uint32_t flush_ack;
 
 	const char *module_name;
 	unsigned queue_ids;
@@ -208,7 +209,8 @@ static void aac_in_listener(u32 evt_id, union auddev_evt_data *evt_payload,
 		audio->source |= (0x1 << evt_payload->routing_id);
 		spin_unlock_irqrestore(&audio->dev_lock, flags);
 
-		if ((audio->running == 1) && (audio->enabled == 1))
+		if ((audio->running == 1) && (audio->enabled == 1) &&
+			(audio->mode == MSM_AUD_ENC_MODE_TUNNEL))
 			audaac_in_record_config(audio, 1);
 
 		break;
@@ -223,13 +225,14 @@ static void aac_in_listener(u32 evt_id, union auddev_evt_data *evt_payload,
 		if ((!audio->running) || (!audio->enabled))
 			break;
 
-		/* Turn of as per source */
-		if (audio->source)
-			audaac_in_record_config(audio, 1);
-		else
+		if (audio->mode == MSM_AUD_ENC_MODE_TUNNEL) {
+			/* Turn of as per source */
+			if (audio->source)
+				audaac_in_record_config(audio, 1);
+			else
 			/* Turn off all */
-			audaac_in_record_config(audio, 0);
-
+				audaac_in_record_config(audio, 0);
+		}
 		break;
 	}
 	case AUDDEV_EVT_FREQ_CHG: {
@@ -242,7 +245,8 @@ static void aac_in_listener(u32 evt_id, union auddev_evt_data *evt_payload,
 			   with device sample rate */
 			if (evt_payload->freq_info.sample_rate !=
 				audio->samp_rate) {
-				audaac_in_record_config(audio, 0);
+				if (audio->mode == MSM_AUD_ENC_MODE_TUNNEL)
+					audaac_in_record_config(audio, 0);
 				audio->abort = 1;
 				wake_up(&audio->wait);
 			}
@@ -303,7 +307,10 @@ static void audpreproc_dsp_event(void *data, unsigned id,  void *msg)
 			}
 		} else { /* Encoder disable success */
 			audio->running = 0;
-			audaac_in_record_config(audio, 0);
+			if (audio->mode == MSM_AUD_ENC_MODE_TUNNEL)
+				audaac_in_record_config(audio, 0);
+			else
+				wake_up(&audio->wait_enable);
 		}
 		break;
 	}
@@ -327,6 +334,7 @@ static void audpreproc_dsp_event(void *data, unsigned id,  void *msg)
 	}
 	case AUDPREPROC_AFE_CMD_AUDIO_RECORD_CFG_DONE_MSG: {
 		MM_DBG("AFE_CMD_AUDIO_RECORD_CFG_DONE_MSG\n");
+		wake_up(&audio->wait_enable);
 		break;
 	}
 	default:
@@ -349,8 +357,8 @@ static void audrec_dsp_event(void *data, unsigned id, size_t len,
 				audaac_in_record_config(audio, 1);
 		} else {
 			audpreproc_pcm_send_data(audio, 1);
+			wake_up(&audio->wait_enable);
 		}
-		wake_up(&audio->wait_enable);
 		break;
 	}
 	case AUDREC_FATAL_ERR_MSG: {
@@ -411,6 +419,7 @@ static void audrec_dsp_event(void *data, unsigned id, size_t len,
 	case AUDREC_CMD_FLUSH_DONE_MSG: {
 		audio->wflush = 0;
 		audio->rflush = 0;
+		audio->flush_ack = 1;
 		wake_up(&audio->write_wait);
 		MM_DBG("flush ack recieved\n");
 		break;
@@ -789,6 +798,7 @@ static long audaac_in_ioctl(struct file *file,
 			else
 				rc = 0;
 		}
+		audio->stopped = 0;
 		break;
 	}
 	case AUDIO_STOP: {
@@ -1220,7 +1230,12 @@ static ssize_t audaac_in_write(struct file *file,
 exit:
 	frame->used = count;
 	audio->out_head ^= 1;
-	audpreproc_pcm_send_data(audio, 0);
+	if (!audio->flush_ack)
+		audpreproc_pcm_send_data(audio, 0);
+	else {
+		audpreproc_pcm_send_data(audio, 1);
+		audio->flush_ack = 0;
+	}
 	if (eos_condition == AUDPREPROC_AAC_EOS_SET)
 		rc = audpreproc_aac_process_eos(audio, start, mfield_size);
 	mutex_unlock(&audio->write_lock);
@@ -1246,6 +1261,10 @@ static int audaac_in_release(struct inode *inode, struct file *file)
 	audpreproc_aenc_free(audio->enc_id);
 	audio->audrec = NULL;
 	audio->opened = 0;
+	if (audio->out_data) {
+		iounmap(audio->out_data);
+		pmem_kfree(audio->out_phys);
+	}
 	mutex_unlock(&audio->lock);
 	return 0;
 }
@@ -1313,6 +1332,7 @@ static int audaac_in_open(struct inode *inode, struct file *file)
 	audio->abort = 0;
 	audio->wflush = 0;
 	audio->rflush = 0;
+	audio->flush_ack = 0;
 
 	audaac_in_flush(audio);
 	audaac_out_flush(audio);
@@ -1355,6 +1375,8 @@ static int audaac_in_open(struct inode *inode, struct file *file)
 					aac_in_listener, (void *) audio);
 	if (rc) {
 		MM_ERR("failed to register device event listener\n");
+		iounmap(audio->out_data);
+		pmem_kfree(audio->out_phys);
 		goto evt_error;
 	}
 	audio->mfield = META_OUT_SIZE;

@@ -82,6 +82,9 @@ EXPORT_SYMBOL(msm_get_voice_state);
 int msm_set_voice_mute(int dir, int mute)
 {
 	MM_DBG("dir %x mute %x\n", dir, mute);
+	if (!audio_dev_ctrl.voice_rx_dev
+		|| !audio_dev_ctrl.voice_tx_dev)
+		return -EPERM;
 	if (dir == DIR_TX) {
 		routing_info.tx_mute = mute;
 		broadcast_event(AUDDEV_EVT_DEVICE_VOL_MUTE_CHG,
@@ -94,6 +97,9 @@ EXPORT_SYMBOL(msm_set_voice_mute);
 
 int msm_set_voice_vol(int dir, s32 volume)
 {
+	if (!audio_dev_ctrl.voice_rx_dev
+		|| !audio_dev_ctrl.voice_tx_dev)
+		return -EPERM;
 	if (dir == DIR_TX) {
 		routing_info.voice_tx_vol = volume;
 		broadcast_event(AUDDEV_EVT_DEVICE_VOL_MUTE_CHG,
@@ -742,8 +748,13 @@ void broadcast_event(u32 evt_id, u32 dev_id, u32 session_id)
 	if ((evt_id != AUDDEV_EVT_START_VOICE)
 		&& (evt_id != AUDDEV_EVT_END_VOICE)
 		&& (evt_id != AUDDEV_EVT_STREAM_VOL_CHG)
-		&& (evt_id != AUDDEV_EVT_VOICE_STATE_CHG))
+		&& (evt_id != AUDDEV_EVT_VOICE_STATE_CHG)) {
 		dev_info = audio_dev_ctrl_find_dev(dev_id);
+		if (IS_ERR(dev_info)) {
+			MM_ERR("pass invalid dev_id\n");
+			return;
+		}
+	}
 
 	if (event.cb != NULL)
 		callback = event.cb;
@@ -786,6 +797,9 @@ void broadcast_event(u32 evt_id, u32 dev_id, u32 session_id)
 		}
 
 		MM_DBG("dev_info->sessions = %08x\n", dev_info->sessions);
+//Div2-SW5-BSP-Volume Control-00+{
+        MM_INFO("Device Name= %s, Max= %d, Min= %d \n", dev_info->name, dev_info->max_voc_rx_vol[0], dev_info->min_voc_rx_vol[0]);
+//Div2-SW5-BSP-Volume Control-00+}
 
 		if ((!session_id && !(dev_info->sessions & session_mask)) ||
 			(session_id && ((dev_info->sessions & session_mask) !=

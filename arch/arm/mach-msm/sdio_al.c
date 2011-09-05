@@ -38,6 +38,12 @@
 #include <linux/mmc/sdio_func.h>
 #include <linux/mmc/sdio_ids.h>
 
+#include <linux/gpio.h>
+#include <mach/gpio.h>
+#include <linux/dma-mapping.h>
+#include <linux/earlysuspend.h>
+#include <mach/dma.h>
+#include "../../../drivers/mmc/host/msm_sdcc.h"
 #include <mach/sdio_al.h>
 
 #define MODULE_NAME "sdio_al"
@@ -121,7 +127,7 @@
 #define PIPE_TX_FIFO_ADDR   0x00
 
 /** Inactivity time to go to sleep in mseconds */
-#define INACTIVITY_TIME_MSEC 1000
+#define INACTIVITY_TIME_MSEC 100
 #define INITIAL_INACTIVITY_TIME_MSEC 5000
 
 /** Context validity check */
@@ -129,6 +135,8 @@
 
 /* Vendor Specific Command */
 #define SD_IO_RW_EXTENDED_QCOM 54
+
+#define TIME_TO_WAIT_US 500
 
 /** Channel priority */
 enum sdio_priority {
@@ -423,6 +431,7 @@ struct sdio_al {
 	int lpm_chan;
 	int is_ok_to_sleep;
 	unsigned long inactivity_time;
+	struct msm_gpio *mdm2ap_status;
 
 	struct timer_list timer;
 	u32 poll_delay_msec;
@@ -432,6 +441,12 @@ struct sdio_al {
 	int is_err;
 
 	u32 signature;
+
+	unsigned int clock;
+
+	unsigned int is_suspended;
+
+	int is_err_printed;
 };
 
 /** The driver context */
@@ -446,6 +461,21 @@ static int get_min_poll_time_msec(void);
 static u32 check_pending_rx_packet(struct sdio_channel *ch, u32 eot);
 static u32 remove_handled_rx_packet(struct sdio_channel *ch);
 static int set_pipe_threshold(int pipe_index, int threshold);
+static int sdio_al_wake_up(u32 enable_wake_up_func);
+
+#define IS_ERR(func, ret)						\
+	do {								\
+		if (sdio_al->is_err) {					\
+			if (!sdio_al->is_err_printed) {			\
+				pr_err(MODULE_NAME			\
+					":In Error state, ignore %s\n",	\
+					func);				\
+				sdio_al->is_err_printed = true;		\
+			}						\
+			return ret;					\
+		}							\
+	} while (0)
+
 
 /**
  *  Write SDIO-Client lpm information
@@ -509,9 +539,11 @@ static int read_mailbox(int from_isr)
 	int ret;
 	struct sdio_func *func1 = sdio_al->card->sdio_func[0];
 	struct sdio_mailbox *mailbox = sdio_al->mailbox;
+	struct mmc_host *host = func1->card->host;
 	u32 new_write_avail = 0;
 	u32 old_write_avail = 0;
 	u32 any_read_avail = 0;
+	u32 any_no_write_avail = 0;
 	int i;
 	u32 rx_notify_bitmask = 0;
 	u32 tx_notify_bitmask = 0;
@@ -521,15 +553,13 @@ static int read_mailbox(int from_isr)
 	u32 underflow_pipe = 0;
 	u32 thresh_intr_mask = 0;
 
-	if (sdio_al->is_err) {
-		pr_info(MODULE_NAME ":In Error state, ignore request\n");
-		return 0;
-	}
+	IS_ERR(__func__, 0);
 
 	pr_debug(MODULE_NAME ":start %s from_isr = %d.\n", __func__, from_isr);
 
 	if (!from_isr)
 		sdio_claim_host(sdio_al->card->sdio_func[0]);
+
 	pr_debug(MODULE_NAME ":before sdio_memcpy_fromio.\n");
 	ret = sdio_memcpy_fromio(func1, mailbox,
 			HW_MAILBOX_ADDR, sizeof(*mailbox));
@@ -622,13 +652,18 @@ static int read_mailbox(int from_isr)
 		if ((old_write_avail <= ch->min_write_avail) &&
 			(new_write_avail >= ch->min_write_avail))
 			tx_notify_bitmask |= (1<<ch->num);
+
+		/* There is not enough write avail for this channel.
+		   We need to keep reading mailbox to wait for the appropriate
+		   write avail and cannot sleep */
+		any_no_write_avail |= (new_write_avail <= ch->min_write_avail);
 	}
 
 	if ((rx_notify_bitmask == 0) && (tx_notify_bitmask == 0) &&
-	    !any_read_avail) {
+	    !any_read_avail && !any_no_write_avail) {
 		pr_debug(MODULE_NAME ":Nothing to Notify\n");
 	} else {
-		pr_info(MODULE_NAME ":Notify bitmask rx=0x%x, tx=0x%x.\n",
+		pr_debug(MODULE_NAME ":Notify bitmask rx=0x%x, tx=0x%x.\n",
 			rx_notify_bitmask, tx_notify_bitmask);
 		/* Restart inactivity timer if any activity on the channel */
 		restart_inactive_time();
@@ -664,7 +699,7 @@ static int read_mailbox(int from_isr)
 
 	if (is_inactive_time_expired()) {
 		/* Go to sleep */
-		pr_info(MODULE_NAME  "Inactivity timer expired."
+		pr_info(MODULE_NAME  ":Inactivity timer expired."
 			" Going to sleep\n");
 		/* Stop mailbox timer */
 		sdio_al->poll_delay_msec = 0;
@@ -681,7 +716,14 @@ static int read_mailbox(int from_isr)
 		/* Mark HOST_OK_TOSLEEP */
 		sdio_al->is_ok_to_sleep = 1;
 		write_lpm_info();
-		pr_info(MODULE_NAME "Finished sleep sequence. Sleep now.\n");
+
+		/* Clock rate is required to enable the clock and set its rate.
+		 * Hence, save the clock rate before disabling it */
+		sdio_al->clock = host->ios.clock;
+		/* Disable clocks here */
+		host->ios.clock = 0;
+		host->ops->set_ios(host, &host->ios);
+		pr_info(MODULE_NAME ":Finished sleep sequence. Sleep now.\n");
 		/* Release wakelock */
 		wake_unlock(&sdio_al->wake_lock);
 	}
@@ -792,6 +834,15 @@ static void worker(struct work_struct *work)
 	while ((sdio_al->is_ready) && (ret == 0)) {
 		pr_debug(MODULE_NAME ":Wait for read mailbox request..\n");
 		wait_event(sdio_al->wait_mbox, sdio_al->ask_mbox);
+		sdio_claim_host(sdio_al->card->sdio_func[0]);
+		if (sdio_al->is_ok_to_sleep) {
+			ret = sdio_al_wake_up(1);
+			if (ret) {
+				sdio_release_host(sdio_al->card->sdio_func[0]);
+				return;
+			}
+		}
+		sdio_release_host(sdio_al->card->sdio_func[0]);
 		ret = read_mailbox(false);
 		sdio_al->ask_mbox = false;
 	}
@@ -992,7 +1043,7 @@ static int read_sdioc_software_header(struct peer_sdioc_sw_header *header)
 		goto exit_err;
 	}
 	/* Upper byte has to be equal - no backward compatibtiyy for unequal */
-	if ((header->version << 16) != (PEER_SDIOC_VERSION << 16)) {
+	if ((header->version >> 16) != (PEER_SDIOC_VERSION >> 16)) {
 		pr_err(MODULE_NAME ":SDIOC SW older version. 0x%x\n",
 			header->version);
 		goto exit_err;
@@ -1179,12 +1230,12 @@ static int set_pipe_threshold(int pipe_index, int threshold)
 static int sdio_al_enable_func_retry(struct sdio_func *func, const char *name)
 {
 	int ret, i;
-	for (i = 0; i < 10; i++) {
+	for (i = 0; i < 200; i++) {
 		ret = sdio_enable_func(func);
 		if (ret) {
 			pr_err(MODULE_NAME ":retry enable %s func#%d red=%d\n",
 					 name, func->num, ret);
-			msleep(500);
+			msleep(10);
 		} else
 			break;
 	}
@@ -1285,33 +1336,6 @@ exit_err:
 	return ret;
 }
 
-/**
- *  Channel Close
- *
- *  Disable the relevant pipes interrupt.
- *  Disable the relevant SDIO-Client function.
- *  Update/stop the timer.
- *  Remove all pending Rx Packet list.
- *
- *  @note: The timer will not restart after expired if
- *  poll time is zero
- *
- */
-static int close_channel(struct sdio_channel *ch)
-{
-	int ret;
-
-	enable_eot_interrupt(ch->rx_pipe_index, false);
-	enable_eot_interrupt(ch->tx_pipe_index, false);
-
-	enable_threshold_interrupt(ch->rx_pipe_index, false);
-	enable_threshold_interrupt(ch->tx_pipe_index, false);
-
-	ret = sdio_disable_func(ch->func);
-
-	return ret;
-}
-
 
 /**
  *  Ask the worker to read the mailbox.
@@ -1350,7 +1374,9 @@ static void restart_timer(void)
 }
 
 /**
- *  Do the wakup sequence
+ *  Do the wakup sequence.
+ *  This function should be called after claiming the host!
+ *  The caller is responsible for releasing the host.
  *
  *  Wake up sequence
  *  1. Get lock
@@ -1359,18 +1385,46 @@ static void restart_timer(void)
  *  4. Restore default thresholds
  *  5. Start the mailbox and inactivity timer again
  */
-static int sdio_al_wake_up(u32 enable_wake_up_func, int is_host_claimed)
+static int sdio_al_wake_up(u32 enable_wake_up_func)
 {
 	int ret = 0, i;
 	struct sdio_func *wk_func =
 		sdio_al->card->sdio_func[SDIO_AL_WAKEUP_FUNC-1];
+	unsigned long time_to_wait;
+	struct mmc_host *host = wk_func->card->host;
+
+	IS_ERR(__func__, -ENODEV);
 
 	/* Wake up sequence */
 	wake_lock(&sdio_al->wake_lock);
-	pr_info(MODULE_NAME "Wake up");
+	if (enable_wake_up_func)
+		pr_info(MODULE_NAME ": Wake up (not by interrupt)");
+	else
+		pr_info(MODULE_NAME ": Wake up by interrupt");
 
-	if (!is_host_claimed)
-		sdio_claim_host(wk_func);
+	if (!sdio_al->is_ok_to_sleep) {
+		pr_info(MODULE_NAME ": already awake, no need to wake up\n");
+		return 0;
+	}
+
+	pr_debug(MODULE_NAME ":Turn clock on\n");
+	/* Enable the clock and set its rate */
+	host->ios.clock = sdio_al->clock;
+	host->ops->set_ios(host, &host->ios);
+	msmsdcc_set_pwrsave(sdio_al->card->host, 0);
+	/* Poll the GPIO */
+	time_to_wait = jiffies + msecs_to_jiffies(100);
+	while (time_before(jiffies, time_to_wait)) {
+			pr_info(MODULE_NAME ":GPIO (%d)=%d\n",
+			       GPIO_PIN(sdio_al->mdm2ap_status->gpio_cfg),
+			       gpio_get_value(GPIO_PIN(
+					sdio_al->mdm2ap_status->gpio_cfg)));
+			if (gpio_get_value(GPIO_PIN(
+					sdio_al->mdm2ap_status->gpio_cfg)))
+				break;
+			udelay(TIME_TO_WAIT_US);
+	}
+
 	if (enable_wake_up_func) {
 		/* Enable Wake up Function */
 		ret = sdio_al_enable_func_retry(wk_func, "wakeup func");
@@ -1379,6 +1433,8 @@ static int sdio_al_wake_up(u32 enable_wake_up_func, int is_host_claimed)
 			       -ret);
 			ret = -EIO;
 			WARN_ON(ret);
+			sdio_al->is_err = true;
+			return ret;
 		}
 	}
 	/* Mark NOT OK_TOSLEEP */
@@ -1396,15 +1452,16 @@ static int sdio_al_wake_up(u32 enable_wake_up_func, int is_host_claimed)
 	}
 	if (enable_wake_up_func)
 		sdio_disable_func(wk_func);
-	if (!is_host_claimed)
-		sdio_release_host(wk_func);
 
 	/* Start the timer again*/
 	restart_inactive_time();
 	sdio_al->poll_delay_msec = get_min_poll_time_msec();
 	start_timer();
 
-	pr_info(MODULE_NAME "Finished Wake up sequence");
+	pr_info(MODULE_NAME ":Finished Wake up sequence");
+
+	msmsdcc_set_pwrsave(sdio_al->card->host, 1);
+	pr_debug(MODULE_NAME ":Turn clock off\n");
 
 	return ret;
 }
@@ -1429,7 +1486,7 @@ static void sdio_func_irq(struct sdio_func *func)
 	pr_debug(MODULE_NAME ":start %s.\n", __func__);
 
 	if (sdio_al->is_ok_to_sleep)
-		sdio_al_wake_up(0, 1);
+		sdio_al_wake_up(0);
 	else
 		restart_timer();
 
@@ -1471,6 +1528,12 @@ static int sdio_al_setup(void)
 	}
 
 	func1 = card->sdio_func[0];
+
+	ret = msm_gpios_request_enable(sdio_al->mdm2ap_status, 1);
+	if (ret) {
+		pr_err(MODULE_NAME "Could not request GPIO\n");
+		return ret;
+	}
 
 	sdio_claim_host(sdio_al->card->sdio_func[0]);
 
@@ -1569,6 +1632,7 @@ static void sdio_al_tear_down(void)
 		sdio_disable_func(func1);
 		sdio_release_host(func1);
 		wake_unlock(&sdio_al->wake_lock);
+		msm_gpios_disable_free(sdio_al->mdm2ap_status, 1);
 	}
 }
 
@@ -1637,10 +1701,7 @@ int sdio_open(const char *name, struct sdio_channel **ret_ch, void *priv,
 		return -ENODEV;
 	}
 
-	if (sdio_al->is_err) {
-		pr_info(MODULE_NAME ":In Error state, ignore %s\n", __func__);
-		return -ENODEV;
-	}
+	IS_ERR(__func__, -ENODEV);
 
 	if (!sdio_al->is_ready) {
 		ret = sdio_al_setup();
@@ -1659,10 +1720,11 @@ int sdio_open(const char *name, struct sdio_channel **ret_ch, void *priv,
 		return -EPERM;
 	}
 
-	if (sdio_al->is_ok_to_sleep) {
-		ret = sdio_al_wake_up(1, 0);
-		if (ret)
-			return ret;
+	sdio_claim_host(sdio_al->card->sdio_func[0]);
+	ret = sdio_al_wake_up(1);
+	if (ret) {
+		sdio_release_host(sdio_al->card->sdio_func[0]);
+		return ret;
 	}
 
 	ch->name = name;
@@ -1677,10 +1739,10 @@ int sdio_open(const char *name, struct sdio_channel **ret_ch, void *priv,
 		ch->is_suspend = false;
 		ch->is_open = true;
 		ask_reading_mailbox();
+		sdio_release_host(sdio_al->card->sdio_func[0]);
 		return 0;
 	}
 
-	sdio_claim_host(sdio_al->card->sdio_func[0]);
 	ret = open_channel(ch);
 	sdio_release_host(sdio_al->card->sdio_func[0]);
 
@@ -1704,39 +1766,9 @@ EXPORT_SYMBOL(sdio_open);
  */
 int sdio_close(struct sdio_channel *ch)
 {
-	int ret;
+	pr_debug(MODULE_NAME ":sdio_close is not supported\n");
 
-	BUG_ON(ch->signature != SDIO_AL_SIGNATURE);
-
-	if (!ch->is_open)
-		return -EINVAL;
-
-	if (sdio_al->is_ok_to_sleep) {
-		ret = sdio_al_wake_up(1, 0);
-		if (ret)
-			return ret;
-	}
-
-	pr_info(MODULE_NAME ":sdio_close %s\n", ch->name);
-
-	/* Stop channel notifications, and read/write operations. */
-	ch->is_open = false;
-	ch->is_suspend = true;
-
-	ch->notify = NULL;
-
-	sdio_claim_host(sdio_al->card->sdio_func[0]);
-	ret = close_channel(ch);
-	sdio_release_host(sdio_al->card->sdio_func[0]);
-
-	do
-		ret = remove_handled_rx_packet(ch);
-	while (ret > 0);
-
-	if  (ch->poll_delay_msec > 0)
-		sdio_al->poll_delay_msec = get_min_poll_time_msec();
-
-	return ret;
+	return -EPERM;
 }
 EXPORT_SYMBOL(sdio_close);
 
@@ -1788,10 +1820,7 @@ int sdio_read(struct sdio_channel *ch, void *data, int len)
 	   sleep */
 	BUG_ON(sdio_al->is_ok_to_sleep);
 
-	if (sdio_al->is_err) {
-		pr_info(MODULE_NAME ":In Error state, ignore sdio_read\n");
-		return -ENODEV;
-	}
+	IS_ERR(__func__, -ENODEV);
 
 	if (!ch->is_open) {
 		pr_info(MODULE_NAME ":reading from closed channel %s\n",
@@ -1799,7 +1828,7 @@ int sdio_read(struct sdio_channel *ch, void *data, int len)
 		return -EINVAL;
 	}
 
-	pr_info(MODULE_NAME ":start ch %s read %d avail %d.\n",
+	pr_debug(MODULE_NAME ":start ch %s read %d avail %d.\n",
 		ch->name, len, ch->read_avail);
 
 	restart_inactive_time();
@@ -1829,14 +1858,14 @@ int sdio_read(struct sdio_channel *ch, void *data, int len)
 		ch->read_avail -= len;
 
 	ch->total_rx_bytes += len;
-	pr_info(MODULE_NAME ":end ch %s read %d avail %d total %d.\n",
+	pr_debug(MODULE_NAME ":end ch %s read %d avail %d total %d.\n",
 		ch->name, len, ch->read_avail, ch->total_rx_bytes);
-
-	sdio_release_host(sdio_al->card->sdio_func[0]);
 
 	if ((ch->read_avail == 0) &&
 	    !((ch->is_packet_mode) && (sdio_al->use_irq)))
 		ask_reading_mailbox();
+
+	sdio_release_host(sdio_al->card->sdio_func[0]);
 
 	return ret;
 }
@@ -1853,10 +1882,7 @@ int sdio_write(struct sdio_channel *ch, const void *data, int len)
 	BUG_ON(ch->signature != SDIO_AL_SIGNATURE);
 	WARN_ON(len > ch->write_avail);
 
-	if (sdio_al->is_err) {
-		pr_info(MODULE_NAME ":In Error state, ignore sdio_write\n");
-		return -ENODEV;
-	}
+	IS_ERR(__func__, -ENODEV);
 
 	if (!ch->is_open) {
 		pr_info(MODULE_NAME ":writing to closed channel %s\n",
@@ -1864,28 +1890,31 @@ int sdio_write(struct sdio_channel *ch, const void *data, int len)
 		return -EINVAL;
 	}
 
+	sdio_claim_host(sdio_al->card->sdio_func[0]);
 	if (sdio_al->is_ok_to_sleep) {
-		ret = sdio_al_wake_up(1, 0);
-		if (ret)
+		ret = sdio_al_wake_up(1);
+		if (ret) {
+			sdio_release_host(sdio_al->card->sdio_func[0]);
 			return ret;
+		}
 	} else {
 		restart_inactive_time();
 	}
 
-	pr_info(MODULE_NAME ":start ch %s write %d avail %d.\n",
+	pr_debug(MODULE_NAME ":start ch %s write %d avail %d.\n",
 		ch->name, len, ch->write_avail);
 
 	if (len > ch->write_avail) {
 		pr_info(MODULE_NAME ":ERR ch %s write %d avail %d.\n",
 				ch->name, len, ch->write_avail);
+		sdio_release_host(sdio_al->card->sdio_func[0]);
 		return -ENOMEM;
 	}
 
-	sdio_claim_host(sdio_al->card->sdio_func[0]);
 	ret = sdio_ch_write(ch, data, len);
 
 	ch->total_tx_bytes += len;
-	pr_info(MODULE_NAME ":end ch %s write %d avail %d total %d.\n",
+	pr_debug(MODULE_NAME ":end ch %s write %d avail %d total %d.\n",
 		ch->name, len, ch->write_avail, ch->total_tx_bytes);
 
 	if (ret) {
@@ -1898,10 +1927,10 @@ int sdio_write(struct sdio_channel *ch, const void *data, int len)
 		ch->write_avail -= len;
 	}
 
-	sdio_release_host(sdio_al->card->sdio_func[0]);
-
 	if (ch->write_avail < ch->min_write_avail)
 		ask_reading_mailbox();
+
+	sdio_release_host(sdio_al->card->sdio_func[0]);
 
 	return ret;
 }
@@ -1917,14 +1946,13 @@ int sdio_set_write_threshold(struct sdio_channel *ch, int threshold)
 	int ret;
 
 	BUG_ON(ch->signature != SDIO_AL_SIGNATURE);
-	if (sdio_al->is_err) {
-		pr_info(MODULE_NAME ":In Error state, ignore %s\n", __func__);
-		return -ENODEV;
-	}
-	if (sdio_al->is_ok_to_sleep) {
-		ret = sdio_al_wake_up(1, 0);
-		if (ret)
-			return ret;
+	IS_ERR(__func__, -ENODEV);
+
+	sdio_claim_host(sdio_al->card->sdio_func[0]);
+	ret = sdio_al_wake_up(1);
+	if (ret) {
+		sdio_release_host(sdio_al->card->sdio_func[0]);
+		return ret;
 	}
 
 	ch->write_threshold = threshold;
@@ -1932,7 +1960,6 @@ int sdio_set_write_threshold(struct sdio_channel *ch, int threshold)
 	pr_debug(MODULE_NAME ":sdio_set_write_threshold %s 0x%x\n",
 			 ch->name, ch->write_threshold);
 
-	sdio_claim_host(sdio_al->card->sdio_func[0]);
 	ret = set_pipe_threshold(ch->tx_pipe_index, ch->write_threshold);
 	sdio_release_host(sdio_al->card->sdio_func[0]);
 
@@ -1950,14 +1977,15 @@ int sdio_set_read_threshold(struct sdio_channel *ch, int threshold)
 	int ret;
 
 	BUG_ON(ch->signature != SDIO_AL_SIGNATURE);
-	if (sdio_al->is_err) {
-		pr_info(MODULE_NAME ":In Error state, ignore %s\n", __func__);
-		return -ENODEV;
-	}
+	IS_ERR(__func__, -ENODEV);
+
+	sdio_claim_host(sdio_al->card->sdio_func[0]);
 	if (sdio_al->is_ok_to_sleep) {
-		ret = sdio_al_wake_up(1, 0);
-		if (ret)
+		ret = sdio_al_wake_up(1);
+		if (ret) {
+			sdio_release_host(sdio_al->card->sdio_func[0]);
 			return ret;
+		}
 	}
 
 	ch->read_threshold = threshold;
@@ -1965,7 +1993,6 @@ int sdio_set_read_threshold(struct sdio_channel *ch, int threshold)
 	pr_debug(MODULE_NAME ":sdio_set_write_threshold %s 0x%x\n",
 			 ch->name, ch->read_threshold);
 
-	sdio_claim_host(sdio_al->card->sdio_func[0]);
 	ret = set_pipe_threshold(ch->rx_pipe_index, ch->read_threshold);
 	sdio_release_host(sdio_al->card->sdio_func[0]);
 
@@ -1980,22 +2007,19 @@ EXPORT_SYMBOL(sdio_set_read_threshold);
  */
 int sdio_set_poll_time(struct sdio_channel *ch, int poll_delay_msec)
 {
+	int ret;
+
 	BUG_ON(ch->signature != SDIO_AL_SIGNATURE);
-	if (sdio_al->is_err) {
-		pr_info(MODULE_NAME ":In Error state, ignore %s\n", __func__);
-		return -ENODEV;
-	}
+	IS_ERR(__func__, -ENODEV);
 
 	if (poll_delay_msec <= 0 || poll_delay_msec > INACTIVITY_TIME_MSEC)
 		return -EPERM;
 
-	if (sdio_al->is_ok_to_sleep) {
-		int ret;
-
-		ret = sdio_al_wake_up(1, 0);
-		if (ret)
-			return ret;
-	}
+	sdio_claim_host(sdio_al->card->sdio_func[0]);
+	ret = sdio_al_wake_up(1);
+	sdio_release_host(sdio_al->card->sdio_func[0]);
+	if (ret)
+		return ret;
 
 	ch->poll_delay_msec = poll_delay_msec;
 
@@ -2007,6 +2031,28 @@ int sdio_set_poll_time(struct sdio_channel *ch, int poll_delay_msec)
 }
 EXPORT_SYMBOL(sdio_set_poll_time);
 
+static int __devinit msm_sdio_al_probe(struct platform_device *pdev)
+{
+	if (sdio_al)
+		sdio_al->mdm2ap_status = pdev->dev.platform_data;
+	return 0;
+}
+
+static int __devexit msm_sdio_al_remove(struct platform_device *pdev)
+{
+	return 0;
+}
+
+static struct platform_driver msm_sdio_al_driver = {
+	.probe          = msm_sdio_al_probe,
+	.remove         = __exit_p(msm_sdio_al_remove),
+	.driver         = {
+		.name   = "msm_sdio_al",
+	},
+};
+
+
+#ifndef DEBUG_SDIO_AL_UNIT_TEST
 /**
  *  Default platform device release function.
  *
@@ -2015,6 +2061,7 @@ static void default_sdio_al_release(struct device *dev)
 {
 	pr_info(MODULE_NAME ":platform device released.\n");
 }
+#endif
 
 /**
  *  Probe to claim the SDIO card.
@@ -2023,12 +2070,23 @@ static void default_sdio_al_release(struct device *dev)
 static int mmc_probe(struct mmc_card *card)
 {
 	int ret = 0;
+
+#ifndef DEBUG_SDIO_AL_UNIT_TEST
 	int i;
+#endif
 
 	dev_info(&card->dev, "Probing..\n");
 
 	if (!mmc_card_sdio(card))
 		return -ENODEV;
+
+	if ((card->cis.vendor != 0x70) ||
+	    ((card->cis.device != 0x2460) && (card->cis.device != 0x0460))) {
+		dev_info(&card->dev,
+			 "ignore card vendor id 0x%x, device id 0x%x",
+			 card->cis.vendor, card->cis.device);
+		return -ENODEV;
+	}
 
 	if (card->sdio_funcs < SDIO_AL_MAX_FUNCS) {
 		dev_info(&card->dev,
@@ -2036,9 +2094,6 @@ static int mmc_probe(struct mmc_card *card)
 			 card->sdio_funcs);
 		return -ENODEV;
 	}
-
-	dev_info(&card->dev, "vendor_id = 0x%x, device_id = 0x%x\n",
-			 card->cis.vendor, card->cis.device);
 
 	dev_info(&card->dev, "SDIO Card claimed.\n");
 
@@ -2076,14 +2131,114 @@ static void mmc_remove(struct mmc_card *card)
 	#endif
 
 	pr_info(MODULE_NAME ":sdio card removed.\n");
+	platform_driver_unregister(&msm_sdio_al_driver);
 }
 
 static struct mmc_driver mmc_driver = {
 	.drv		= {
 		.name   = "sdio_al",
 	},
-	.probe  	= mmc_probe,
-	.remove 	= mmc_remove,
+	.probe		= mmc_probe,
+	.remove		= mmc_remove,
+};
+
+
+/*
+ * SDIO driver functions
+ */
+static int sdio_al_sdio_probe(struct sdio_func *func,
+		const struct sdio_device_id *sdio_dev_id)
+{
+	pr_debug(MODULE_NAME ":sdio_al_sdio_probe was called");
+	return 0;
+}
+
+static void sdio_al_sdio_remove(struct sdio_func *func)
+{
+	pr_debug(MODULE_NAME ":sdio_al_sdio_remove was called");
+}
+
+static int sdio_al_sdio_suspend(struct device *dev)
+{
+	struct sdio_func *func = dev_to_sdio_func(dev);
+	int ret = 0;
+
+
+	pr_info(MODULE_NAME ":sdio_al_sdio_suspend for func %d\n",
+		func->num);
+
+	IS_ERR(__func__, -ENODEV);
+
+	sdio_claim_host(sdio_al->card->sdio_func[0]);
+
+	if (sdio_al->is_suspended) {
+		pr_debug(MODULE_NAME ":already in suspend state\n");
+		sdio_release_host(sdio_al->card->sdio_func[0]);
+		return 0;
+	}
+
+	ret = sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
+
+	if (ret) {
+		pr_err(MODULE_NAME ":Host doesn't support the keep "
+				   "power capability\n");
+		sdio_release_host(sdio_al->card->sdio_func[0]);
+		return ret;
+	}
+
+	/* Check if we can get into suspend */
+	if (!sdio_al->is_ok_to_sleep) {
+		pr_err(MODULE_NAME ":Cannot suspend due to pending data\n");
+		sdio_release_host(sdio_al->card->sdio_func[0]);
+		return -EBUSY;
+	}
+
+	sdio_al->is_suspended = 1;
+
+	sdio_release_host(sdio_al->card->sdio_func[0]);
+
+	return 0;
+}
+
+static int sdio_al_sdio_resume(struct device *dev)
+{
+	struct sdio_func *func = dev_to_sdio_func(dev);
+
+	pr_info(MODULE_NAME ":sdio_al_sdio_resume for func %d\n",
+		func->num);
+
+	sdio_claim_host(sdio_al->card->sdio_func[0]);
+
+	if (!sdio_al->is_suspended) {
+		pr_debug(MODULE_NAME ":already in resume state\n");
+		sdio_release_host(sdio_al->card->sdio_func[0]);
+		return 0;
+	}
+
+	sdio_al->is_suspended = 0;
+
+	sdio_release_host(sdio_al->card->sdio_func[0]);
+
+	return 0;
+}
+
+static struct sdio_device_id sdio_al_sdioid[] = {
+    {.class = 0, .vendor = 0x70, .device = 0x2460},
+    {.class = 0, .vendor = 0x70, .device = 0x0460},
+    {}
+};
+
+static const struct dev_pm_ops sdio_al_sdio_pm_ops = {
+    .suspend = sdio_al_sdio_suspend,
+    .resume = sdio_al_sdio_resume,
+};
+
+static struct sdio_driver sdio_al_sdiofn_driver = {
+    .name      = "sdio_al_sdiofn",
+    .id_table  = sdio_al_sdioid,
+    .probe     = sdio_al_sdio_probe,
+    .remove    = sdio_al_sdio_remove,
+    .drv.pm    = &sdio_al_sdio_pm_ops,
 };
 
 /**
@@ -2108,10 +2263,28 @@ static int __init sdio_al_init(void)
 
 	sdio_al->signature = SDIO_AL_SIGNATURE;
 
+	sdio_al->is_suspended = 0;
+
 	set_default_channels_config();
 
-	ret = mmc_register_driver(&mmc_driver);
+	sdio_al->is_err = false;
+	sdio_al->is_err_printed = false;
 
+	ret = platform_driver_register(&msm_sdio_al_driver);
+	if (ret) {
+		pr_err(MODULE_NAME ": platform_driver_register failed: %d\n",
+		       ret);
+		goto exit;
+	}
+
+	sdio_register_driver(&sdio_al_sdiofn_driver);
+
+	ret = mmc_register_driver(&mmc_driver);
+	if (ret)
+		pr_err(MODULE_NAME ": mmc_register_driver failed: %d\n", ret);
+exit:
+	if (ret)
+		kfree(sdio_al);
 	return ret;
 }
 
@@ -2131,6 +2304,8 @@ static void __exit sdio_al_exit(void)
 	pr_debug(MODULE_NAME ":sdio_al_exit\n");
 
 	sdio_al_tear_down();
+
+	sdio_unregister_driver(&sdio_al_sdiofn_driver);
 
 	kfree(sdio_al->sdioc_sw_header);
 	kfree(sdio_al->mailbox);
