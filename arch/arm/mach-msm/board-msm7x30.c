@@ -3030,7 +3030,7 @@ vreg_codec_s4_fail:
 	return rc;
 }
 
-static struct marimba_codec_platform_data mariba_codec_pdata = {
+static struct marimba_codec_platform_data __refdata mariba_codec_pdata = {
 	.marimba_codec_power =  msm_marimba_codec_power,
 #ifdef CONFIG_MARIMBA_CODEC
 	.snddev_profile_init = msm_snddev_init,
@@ -3064,7 +3064,7 @@ static void __init msm7x30_init_marimba(void)
 	}
 }
 
-static struct marimba_codec_platform_data timpani_codec_pdata = {
+static struct marimba_codec_platform_data __refdata timpani_codec_pdata = {
 	.marimba_codec_power =  msm_marimba_codec_power,
 #ifdef CONFIG_TIMPANI_CODEC
 	.snddev_profile_init = msm_snddev_init_timpani,
