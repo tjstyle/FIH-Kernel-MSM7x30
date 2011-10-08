@@ -158,19 +158,19 @@
 #ifdef CONFIG_VMSPLIT_2G
 #define MSM_PMEM_SF_SIZE    0x1E00000
 #else
-#define MSM_PMEM_SF_SIZE    0x1700000
+#define MSM_PMEM_SF_SIZE    0x1300000
 #endif
 
 /* } FIHTDC, Div2-SW2-BSP, Ming, PMEM */
 /* FIHTDC, Div2-SW2-BSP SungSCLee, HDMI { */
-#define MSM_FB_SIZE		0xA00000       ///0x500000
+#define MSM_FB_SIZE		0x500000       ///0xA00000
 /* } FIHTDC, Div2-SW2-BSP SungSCLee, HDMI */
 #ifdef CONFIG_VMSPLIT_2G
 #define MSM_GPU_PHYS_SIZE       0x200000
 #else
 #define MSM_GPU_PHYS_SIZE       SZ_2M
 #endif
-#define MSM_PMEM_ADSP_SIZE      0x2000000  //SW2-5-CL-Camera-720P-00*
+#define MSM_PMEM_ADSP_SIZE      0x1800000  //SW2-5-CL-Camera-720P-00*
 #define MSM_FLUID_PMEM_ADSP_SIZE	0x2800000
 #define PMEM_KERNEL_EBI1_SIZE   0x600000
 #define MSM_PMEM_AUDIO_SIZE     0x200000

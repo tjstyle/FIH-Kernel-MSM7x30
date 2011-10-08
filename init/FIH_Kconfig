@@ -1581,7 +1581,7 @@ if FIH_CONFIG_GROUP
     config FIH_POWER_LOG
             bool "FIH LOG about Power & Battery Log"
             depends on FIH_CONFIG_GROUP
-            default y
+            default n
             help
                 Enable power & battery log support
 
@@ -1595,7 +1595,7 @@ if FIH_CONFIG_GROUP
     config FIH_FLOG
             bool "FIH Flog"
             depends on FIH_CONFIG_GROUP
-            default y
+            default n
             help
                 Enable FTM log mechanism
 
@@ -1609,7 +1609,7 @@ if FIH_CONFIG_GROUP
     config FIH_MLOG
             bool "FIH Mlog"
             depends on FIH_CONFIG_GROUP
-            default y
+            default n
             help
                 Enable Mlog mechanism
 
